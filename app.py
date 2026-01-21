@@ -68,7 +68,7 @@ if st.button("Process Files"):
 
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # Save uploaded files
+            # ---------- Save uploaded files ---------- #
             paths = {}
             for f, name in [
                 (sd_file, "sd.xlsx"),
@@ -82,13 +82,11 @@ if st.button("Process Files"):
                 paths[name] = path
 
             # ---------- SALES REGISTER ---------- #
-
             df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
             df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
             df_sales = pd.concat([df_sd, df_sr], ignore_index=True)
 
             # ---------- GL ---------- #
-
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
             gl_text_col = find_column_by_keywords(df_gl, ["g/l", "account", "long", "text"], "GL Text")
@@ -106,7 +104,6 @@ if st.button("Process Files"):
             df_revenue = df_gl[df_gl[gl_account_col].astype(str).str.startswith("3")]
 
             # ---------- TB ---------- #
-
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
             tb_text_col = find_column_by_keywords(df_tb, ["g/l", "acct", "long", "text"], "TB GL Text")
@@ -117,20 +114,14 @@ if st.button("Process Files"):
             df_tb_gst["Difference as per TB"] = df_tb_gst[credit_col] - df_tb_gst[debit_col]
 
             # ---------- GST SUMMARY ---------- #
-
             gst_summary_df = (
-                df_gst
-                .groupby(gl_text_col, as_index=False)[value_col]
+                df_gst.groupby(gl_text_col, as_index=False)[value_col]
                 .sum()
-                .rename(columns={
-                    gl_text_col: "GST Type",
-                    value_col: "GST Payable as per GL"
-                })
+                .rename(columns={gl_text_col: "GST Type", value_col: "GST Payable as per GL"})
             )
 
             tb_summary_df = (
-                df_tb_gst
-                .groupby(tb_text_col, as_index=False)["Difference as per TB"]
+                df_tb_gst.groupby(tb_text_col, as_index=False)["Difference as per TB"]
                 .sum()
                 .rename(columns={tb_text_col: "GST Type"})
             )
@@ -142,8 +133,7 @@ if st.button("Process Files"):
                 how="left"
             ).fillna(0)
 
-            # ---------- GSTR-1 WORKBOOK ---------- #
-
+            # ---------- WRITE WORKBOOK ---------- #
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
 
             with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
@@ -152,35 +142,32 @@ if st.button("Process Files"):
                 df_gst.to_excel(writer, sheet_name="GST payable", index=False)
                 summary_df.to_excel(writer, sheet_name="GST Summary", index=False)
 
-            # ---------- ADD FORMULAS & FORMATS ---------- #
-
+            # ---------- POST-PROCESSING IN EXCEL ---------- #
             wb = load_workbook(gstr_path)
             ws_sales = wb["Sales register"]
             ws_rev = wb["Revenue"]
             ws_gst = wb["GST payable"]
             ws_summary = wb["GST Summary"]
 
-            # --- Multiply specified Sales register columns by -1 ---
-            negative_columns = [
-                "Taxable value",
-                "IGST Amt",
-                "CGST Amt",
-                "SGST/UTGST Amt",
-            ]
+            # ----- Column letters -----
+            doc_type_col = get_column_letter_by_header(ws_sales, "Document Type")
+            taxable_col = get_column_letter_by_header(ws_sales, "Taxable value")
+            igst_col = get_column_letter_by_header(ws_sales, "IGST Amt")
+            cgst_col = get_column_letter_by_header(ws_sales, "CGST Amt")
+            sgst_col = get_column_letter_by_header(ws_sales, "SGST/UTGST Amt")
 
-            for col_name in negative_columns:
-                try:
-                    col_letter = get_column_letter_by_header(ws_sales, col_name)
-                    for r in range(2, ws_sales.max_row + 1):
-                        ws_sales[col_letter + str(r)] = f"={col_letter}{r}*-1"
-                except KeyError:
-                    pass  # column not present in some datasets
-
-            # --- VLOOKUPS ---
             sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
             rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
             gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
 
+            # ----- Apply sign reversal formulas -----
+            for r in range(2, ws_sales.max_row + 1):
+                for col_letter in [taxable_col, igst_col, cgst_col, sgst_col]:
+                    ws_sales[f"{col_letter}{r}"] = (
+                        f'=IF(${doc_type_col}{r}="C",{col_letter}{r}*-1,{col_letter}{r})'
+                    )
+
+            # ----- VLOOKUPS -----
             sales_last_col = ws_sales.max_column
             ws_sales.cell(1, sales_last_col + 1, "Revenue VLOOKUP")
             ws_sales.cell(1, sales_last_col + 2, "GST Payable VLOOKUP")
@@ -195,7 +182,7 @@ if st.button("Process Files"):
                     f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
                 )
 
-            # --- Cross VLOOKUPS ---
+            # ----- Cross VLOOKUPS -----
             rev_last_col = ws_rev.max_column
             ws_rev.cell(1, rev_last_col + 1, "Sales Register VLOOKUP")
             for r in range(2, ws_rev.max_row + 1):
@@ -212,7 +199,7 @@ if st.button("Process Files"):
                     f'=IFERROR(VLOOKUP({gst_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
                 )
 
-            # --- Net Difference formula + number format ---
+            # ----- Net Difference formula + NUMBER format -----
             ws_summary.cell(1, 4, "Net Difference")
             for r in range(2, ws_summary.max_row + 1):
                 cell = ws_summary.cell(r, 4, f"=B{r}+C{r}")
