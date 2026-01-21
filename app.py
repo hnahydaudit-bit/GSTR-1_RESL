@@ -18,26 +18,21 @@ def normalize_columns(df):
 
 
 def find_column_by_keywords(df, keywords, label):
-    """
-    Finds a column containing ALL keywords (case-insensitive).
-    This is hardened against:
-    - Acct vs Account
-    - Presence/absence of colon
-    - Minor SAP naming variations
-    """
     for col in df.columns:
         col_l = col.lower()
         if all(k.lower() in col_l for k in keywords):
             return col
-
-    # Enhanced error with suggestions
-    possible_matches = [col for col in df.columns if any(k.lower() in col.lower() for k in keywords)]
     raise KeyError(
         f"{label} column not found.\n"
         f"Expected keywords: {keywords}\n"
-        f"Found columns: {list(df.columns)}\n"
-        f"Possible matches (partial): {possible_matches}"
+        f"Found columns: {list(df.columns)}"
     )
+
+# ---------------- Session state ---------------- #
+
+if "processed" not in st.session_state:
+    st.session_state.processed = False
+    st.session_state.outputs = {}
 
 # ---------------- UI ---------------- #
 
@@ -63,8 +58,7 @@ if st.button("Process Files"):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # ---------- Save uploaded files ---------- #
-
+            # Save uploaded files
             paths = {}
             for f, name in [
                 (sd_file, "sd.xlsx"),
@@ -77,13 +71,31 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD + SR ---------- #
+            # ---------- SD (normal read) ---------- #
 
-            df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
-            df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
+            df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"], header=0))
+
+            # ---------- SR (FORCED SAFE READ) ---------- #
+            # Read everything as raw data
+            df_sr_raw = pd.read_excel(paths["sr.xlsx"], header=None)
+
+            # First row is header – extract it
+            sr_headers = (
+                df_sr_raw.iloc[0]
+                .astype(str)
+                .str.strip()
+                .str.replace(r"\s+", " ", regex=True)
+            )
+
+            # Remaining rows are ALL data rows (including first data row)
+            df_sr = df_sr_raw.iloc[1:].copy()
+            df_sr.columns = sr_headers
+            df_sr.reset_index(drop=True, inplace=True)
+
+            # ---------- CONSOLIDATION (GUARANTEED) ---------- #
 
             df_consolidated = pd.concat(
-                [df_sd, df_sr.iloc[1:]],
+                [df_sd, df_sr],
                 ignore_index=True
             )
 
@@ -137,12 +149,9 @@ if st.button("Process Files"):
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
-            # Debug: Show TB columns (remove after testing)
-            st.write(f"TB columns after normalization: {list(df_tb.columns)}")
-
             tb_text_col = find_column_by_keywords(
                 df_tb,
-                ["g/l", "long", "text"],  # ← UPDATED: Relaxed keywords for better matching
+                ["g/l", "acct", "long", "text"],
                 "TB GL Long Text"
             )
 
@@ -162,8 +171,6 @@ if st.button("Process Files"):
             df_tb_gst["Difference"] = (
                 df_tb_gst[credit_col] - df_tb_gst[debit_col]
             )
-
-            # ---------- Summary ---------- #
 
             gst_summary = (
                 df_gst.groupby(gl_text_col)[value_col].sum()
@@ -189,21 +196,31 @@ if st.button("Process Files"):
             )
             summary_df.to_excel(summary_path, index=False)
 
-            # ---------- Downloads ---------- #
+            # ---------- STORE OUTPUTS ---------- #
 
+            st.session_state.outputs = {
+                "SD-SR Consolidated": consolidated_path,
+                "GSTR-1 Workbook": gstr_path,
+                "Summary": summary_path,
+            }
+
+            st.session_state.processed = True
             st.success("Processing completed successfully")
-
-            for label, path in {
-                "Download SD-SR Consolidated": consolidated_path,
-                "Download GSTR-1 Workbook": gstr_path,
-                "Download Summary": summary_path,
-            }.items():
-                with open(path, "rb") as f:
-                    st.download_button(
-                        label,
-                        f,
-                        file_name=os.path.basename(path)
-                    )
 
     except Exception as e:
         st.error(str(e))
+
+# ---------------- Downloads ---------------- #
+
+if st.session_state.processed:
+    st.subheader("Download Outputs")
+
+    for label, path in st.session_state.outputs.items():
+        with open(path, "rb") as f:
+            st.download_button(
+                label=f"Download {label}",
+                data=f,
+                file_name=os.path.basename(path),
+                key=label
+            )
+
