@@ -51,20 +51,29 @@ if st.button("Process Files"):
             df_gl = normalize_columns(pd.read_excel(gl_file))
             df_tb = normalize_columns(pd.read_excel(tb_file))
 
+            # ---------- SANITIZE NUMERIC DATA (CRITICAL) ---------- #
+
+            df_sales.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_gl.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_tb.replace([np.inf, -np.inf], np.nan, inplace=True)
+
             # ---------- CREDIT NOTE NEGATIVES ---------- #
 
             amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
             cn_mask = df_sales["Document Type"] == "C"
 
             for col in amount_cols:
+                df_sales[col] = pd.to_numeric(df_sales[col], errors="coerce").fillna(0)
                 df_sales.loc[cn_mask, col] = -df_sales.loc[cn_mask, col].abs()
 
             # ---------- SALES SUMMARY CLASSIFICATION ---------- #
 
+            df_sales["Tax rate"] = pd.to_numeric(df_sales["Tax rate"], errors="coerce").fillna(0)
+
             def classify(row):
                 it = row["Invoice type"]
                 dt = row["Document Type"]
-                tr = float(row["Tax rate"] or 0)
+                tr = row["Tax rate"]
 
                 if it == "SEWOP":
                     return "SEZWOP"
@@ -82,7 +91,7 @@ if st.button("Process Files"):
 
             df_sales["Sales summary"] = df_sales.apply(classify, axis=1)
 
-            # ---------- GST SUMMARY (FIXED AMOUNT COLUMN) ---------- #
+            # ---------- GST SUMMARY ---------- #
 
             gst_accounts = [
                 "Central GST Payable",
@@ -90,11 +99,16 @@ if st.button("Process Files"):
                 "State GST Payable"
             ]
 
+            df_gl["Company Code Currency Value"] = pd.to_numeric(
+                df_gl["Company Code Currency Value"], errors="coerce"
+            ).fillna(0)
+
             df_gst = df_gl[df_gl["G/L Account: Long Text"].isin(gst_accounts)]
 
             df_tb_gst = df_tb[df_tb["G/L Acct Long Text"].isin(gst_accounts)].copy()
             df_tb_gst["Difference as per TB"] = (
-                df_tb_gst["Period 09 C"] - df_tb_gst["Period 09 D"]
+                pd.to_numeric(df_tb_gst["Period 09 C"], errors="coerce").fillna(0)
+                - pd.to_numeric(df_tb_gst["Period 09 D"], errors="coerce").fillna(0)
             )
 
             summary_df = (
@@ -116,10 +130,13 @@ if st.button("Process Files"):
                 .fillna(0)
             )
 
-            # ---------- WRITE EXCEL USING XLSXWRITER ---------- #
+            # ---------- WRITE EXCEL (XLSXWRITER SAFE MODE) ---------- #
 
             output_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-            wb = xlsxwriter.Workbook(output_path)
+            wb = xlsxwriter.Workbook(
+                output_path,
+                {"nan_inf_to_errors": True}
+            )
 
             ws_sales = wb.add_worksheet("Sales register")
             ws_sum = wb.add_worksheet("GST Summary")
