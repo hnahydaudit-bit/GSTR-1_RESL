@@ -56,6 +56,8 @@ if st.button("Process Files"):
         st.stop()
 
     try:
+        outputs = {}
+
         with tempfile.TemporaryDirectory() as tmpdir:
 
             # Save uploaded files
@@ -71,12 +73,11 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD + SR CONSOLIDATION ---------- #
+            # ---------- SD + SR ---------- #
 
             df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
             df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
 
-            # Take ALL SD rows + ALL SR rows
             df_consolidated = pd.concat(
                 [df_sd, df_sr],
                 ignore_index=True
@@ -87,18 +88,19 @@ if st.button("Process Files"):
             )
             df_consolidated.to_excel(consolidated_path, index=False)
 
-            # ---------- GL PROCESSING ---------- #
+            with open(consolidated_path, "rb") as f:
+                outputs["SD-SR Consolidated.xlsx"] = f.read()
+
+            # ---------- GL ---------- #
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
             gl_text_col = find_column_by_keywords(
                 df_gl, ["g/l", "account", "long", "text"], "GL Long Text"
             )
-
             gl_account_col = find_column_by_keywords(
                 df_gl, ["g/l", "account"], "GL Account"
             )
-
             value_col = find_column_by_keywords(
                 df_gl, ["value"], "GL Amount"
             )
@@ -122,18 +124,19 @@ if st.button("Process Files"):
                 df_gst.to_excel(writer, sheet_name="GST Payable", index=False)
                 df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
 
-            # ---------- TB PROCESSING ---------- #
+            with open(gstr_path, "rb") as f:
+                outputs["GSTR-1 Workbook.xlsx"] = f.read()
+
+            # ---------- TB + SUMMARY ---------- #
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
             tb_text_col = find_column_by_keywords(
                 df_tb, ["g/l", "acct", "long", "text"], "TB GL Long Text"
             )
-
             debit_col = find_column_by_keywords(
                 df_tb, ["period", "d"], "TB Debit"
             )
-
             credit_col = find_column_by_keywords(
                 df_tb, ["period", "c"], "TB Credit"
             )
@@ -142,8 +145,6 @@ if st.button("Process Files"):
             df_tb_gst["Difference"] = (
                 df_tb_gst[credit_col] - df_tb_gst[debit_col]
             )
-
-            # ---------- SUMMARY (MERGE-BASED FIX) ---------- #
 
             gst_summary_df = (
                 df_gst
@@ -170,11 +171,7 @@ if st.button("Process Files"):
                 tb_summary_df,
                 on="GST Type",
                 how="left"
-            )
-
-            summary_df["Difference as per TB"] = (
-                summary_df["Difference as per TB"].fillna(0)
-            )
+            ).fillna(0)
 
             summary_df["Net Difference"] = (
                 summary_df["GST Payable as per GL"]
@@ -186,16 +183,13 @@ if st.button("Process Files"):
             )
             summary_df.to_excel(summary_path, index=False)
 
-            # ---------- STORE OUTPUTS ---------- #
+            with open(summary_path, "rb") as f:
+                outputs["Summary.xlsx"] = f.read()
 
-            st.session_state.outputs = {
-                "SD-SR Consolidated": consolidated_path,
-                "GSTR-1 Workbook": gstr_path,
-                "Summary": summary_path,
-            }
-
-            st.session_state.processed = True
-            st.success("Processing completed successfully")
+        # store BYTES, not paths
+        st.session_state.outputs = outputs
+        st.session_state.processed = True
+        st.success("Processing completed successfully")
 
     except Exception as e:
         st.error(str(e))
@@ -205,12 +199,12 @@ if st.button("Process Files"):
 if st.session_state.processed:
     st.subheader("Download Outputs")
 
-    for label, path in st.session_state.outputs.items():
-        with open(path, "rb") as f:
-            st.download_button(
-                label=f"Download {label}",
-                data=f,
-                file_name=os.path.basename(path),
-                key=label
-            )
+    for filename, data in st.session_state.outputs.items():
+        st.download_button(
+            label=f"Download {filename}",
+            data=data,
+            file_name=filename,
+            key=filename
+        )
+
 
