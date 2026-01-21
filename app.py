@@ -30,10 +30,13 @@ def find_column_by_keywords(df, keywords, label):
         if all(k.lower() in col_l for k in keywords):
             return col
 
+    # Enhanced error with suggestions
+    possible_matches = [col for col in df.columns if any(k.lower() in col.lower() for k in keywords)]
     raise KeyError(
         f"{label} column not found.\n"
         f"Expected keywords: {keywords}\n"
-        f"Found columns: {list(df.columns)}"
+        f"Found columns: {list(df.columns)}\n"
+        f"Possible matches (partial): {possible_matches}"
     )
 
 # ---------------- UI ---------------- #
@@ -134,9 +137,12 @@ if st.button("Process Files"):
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
+            # Debug: Show TB columns (remove after testing)
+            st.write(f"TB columns after normalization: {list(df_tb.columns)}")
+
             tb_text_col = find_column_by_keywords(
                 df_tb,
-                ["g/l", "long", "text"],  # ← UPDATED: Removed "acct" for flexibility (handles "Acct" or "Account" variations)
+                ["g/l", "long", "text"],  # ← UPDATED: Relaxed keywords for better matching
                 "TB GL Long Text"
             )
 
