@@ -155,18 +155,32 @@ if st.button("Process Files"):
             # ---------- ADD FORMULAS & FORMATS ---------- #
 
             wb = load_workbook(gstr_path)
-
             ws_sales = wb["Sales register"]
             ws_rev = wb["Revenue"]
             ws_gst = wb["GST payable"]
             ws_summary = wb["GST Summary"]
 
-            # --- Column detection for vlookup ---
+            # --- Multiply specified Sales register columns by -1 ---
+            negative_columns = [
+                "Taxable value",
+                "IGST Amt",
+                "CGST Amt",
+                "SGST/UTGST Amt",
+            ]
+
+            for col_name in negative_columns:
+                try:
+                    col_letter = get_column_letter_by_header(ws_sales, col_name)
+                    for r in range(2, ws_sales.max_row + 1):
+                        ws_sales[col_letter + str(r)] = f"={col_letter}{r}*-1"
+                except KeyError:
+                    pass  # column not present in some datasets
+
+            # --- VLOOKUPS ---
             sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
             rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
             gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
 
-            # --- Sales register vlookups ---
             sales_last_col = ws_sales.max_column
             ws_sales.cell(1, sales_last_col + 1, "Revenue VLOOKUP")
             ws_sales.cell(1, sales_last_col + 2, "GST Payable VLOOKUP")
@@ -181,7 +195,7 @@ if st.button("Process Files"):
                     f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
                 )
 
-            # --- Cross vlookups ---
+            # --- Cross VLOOKUPS ---
             rev_last_col = ws_rev.max_column
             ws_rev.cell(1, rev_last_col + 1, "Sales Register VLOOKUP")
             for r in range(2, ws_rev.max_row + 1):
@@ -198,7 +212,7 @@ if st.button("Process Files"):
                     f'=IFERROR(VLOOKUP({gst_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
                 )
 
-            # --- Net Difference formula + NUMBER format ---
+            # --- Net Difference formula + number format ---
             ws_summary.cell(1, 4, "Net Difference")
             for r in range(2, ws_summary.max_row + 1):
                 cell = ws_summary.cell(r, 4, f"=B{r}+C{r}")
@@ -226,10 +240,3 @@ if st.session_state.processed:
             file_name=filename,
             key=filename
         )
-
-
-
-
-
-
-
