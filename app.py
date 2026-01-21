@@ -38,7 +38,7 @@ if st.button("Process Files"):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # ---------- READ INPUTS ---------- #
+            # ---------- READ INPUT FILES ---------- #
 
             df_sales = pd.concat(
                 [
@@ -53,16 +53,19 @@ if st.button("Process Files"):
 
             # ---------- CREDIT NOTE NEGATIVES ---------- #
 
-            amt_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
-            mask_cn = df_sales["Document Type"] == "C"
+            amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
+            cn_mask = df_sales["Document Type"] == "C"
 
-            for c in amt_cols:
-                df_sales.loc[mask_cn, c] = -df_sales.loc[mask_cn, c].abs()
+            for col in amount_cols:
+                df_sales.loc[cn_mask, col] = -df_sales.loc[cn_mask, col].abs()
 
             # ---------- SALES SUMMARY CLASSIFICATION ---------- #
 
             def classify(row):
-                it, dt, tr = row["Invoice type"], row["Document Type"], float(row["Tax rate"] or 0)
+                it = row["Invoice type"]
+                dt = row["Document Type"]
+                tr = float(row["Tax rate"] or 0)
+
                 if it == "SEWOP":
                     return "SEZWOP"
                 if it == "SEWP":
@@ -79,7 +82,7 @@ if st.button("Process Files"):
 
             df_sales["Sales summary"] = df_sales.apply(classify, axis=1)
 
-            # ---------- GST SUMMARY ---------- #
+            # ---------- GST SUMMARY (FIXED AMOUNT COLUMN) ---------- #
 
             gst_accounts = [
                 "Central GST Payable",
@@ -88,17 +91,24 @@ if st.button("Process Files"):
             ]
 
             df_gst = df_gl[df_gl["G/L Account: Long Text"].isin(gst_accounts)]
+
             df_tb_gst = df_tb[df_tb["G/L Acct Long Text"].isin(gst_accounts)].copy()
-            df_tb_gst["Difference as per TB"] = df_tb_gst["Period 09 C"] - df_tb_gst["Period 09 D"]
+            df_tb_gst["Difference as per TB"] = (
+                df_tb_gst["Period 09 C"] - df_tb_gst["Period 09 D"]
+            )
 
             summary_df = (
-                df_gst.groupby("G/L Account: Long Text", as_index=False)["Value"].sum()
+                df_gst
+                .groupby("G/L Account: Long Text", as_index=False)["Company Code Currency Value"]
+                .sum()
                 .rename(columns={
                     "G/L Account: Long Text": "GST Type",
-                    "Value": "GST Payable as per GL"
+                    "Company Code Currency Value": "GST Payable as per GL"
                 })
                 .merge(
-                    df_tb_gst.groupby("G/L Acct Long Text", as_index=False)["Difference as per TB"].sum()
+                    df_tb_gst
+                    .groupby("G/L Acct Long Text", as_index=False)["Difference as per TB"]
+                    .sum()
                     .rename(columns={"G/L Acct Long Text": "GST Type"}),
                     on="GST Type",
                     how="left"
@@ -106,22 +116,18 @@ if st.button("Process Files"):
                 .fillna(0)
             )
 
-            # ---------- WRITE EXCEL (XLSXWRITER) ---------- #
+            # ---------- WRITE EXCEL USING XLSXWRITER ---------- #
 
             output_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
             wb = xlsxwriter.Workbook(output_path)
 
             ws_sales = wb.add_worksheet("Sales register")
-            ws_rev = wb.add_worksheet("Revenue")
-            ws_gst = wb.add_worksheet("GST payable")
             ws_sum = wb.add_worksheet("GST Summary")
             ws_pivot = wb.add_worksheet("Sales summary")
 
-            # ---------- WRITE SALES REGISTER ---------- #
-
+            # --- Sales register --- #
             for c, col in enumerate(df_sales.columns):
                 ws_sales.write(0, c, col)
-
             for r in range(len(df_sales)):
                 for c, col in enumerate(df_sales.columns):
                     ws_sales.write(r + 1, c, df_sales.iloc[r, c])
@@ -134,23 +140,19 @@ if st.button("Process Files"):
                 {"columns": [{"header": c} for c in df_sales.columns]}
             )
 
-            # ---------- GST SUMMARY ---------- #
-
+            # --- GST Summary --- #
             for c, col in enumerate(summary_df.columns):
                 ws_sum.write(0, c, col)
-
             for r in range(len(summary_df)):
                 for c, col in enumerate(summary_df.columns):
                     ws_sum.write(r + 1, c, summary_df.iloc[r, c])
 
             num_fmt = wb.add_format({"num_format": "0.00"})
+            ws_sum.write(0, 3, "Net Difference")
             for r in range(1, len(summary_df) + 1):
                 ws_sum.write_formula(r, 3, f"=B{r+1}+C{r+1}", num_fmt)
 
-            ws_sum.write(0, 3, "Net Difference")
-
-            # ---------- PIVOT TABLE ---------- #
-
+            # --- Pivot table --- #
             wb.add_pivot_table({
                 "name": "SalesSummaryPivot",
                 "source": f"'Sales register'!A1:{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}",
