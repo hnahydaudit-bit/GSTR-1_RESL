@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
-import os
 import tempfile
+import os
 import xlsxwriter
-from openpyxl import load_workbook
 
 st.set_page_config(page_title="GSTR-1 Processor", layout="centered")
 st.title("GSTR-1 Excel Processor")
@@ -18,46 +17,25 @@ def normalize_columns(df):
     )
     return df
 
-
-def find_column(df, name):
-    if name not in df.columns:
-        raise KeyError(f"Column '{name}' not found")
-    return name
-
-
-def get_col_idx(headers, name):
-    return headers.index(name)
-
-# ---------------- Session State ---------------- #
-
-if "processed" not in st.session_state:
-    st.session_state.processed = False
-    st.session_state.outputs = {}
-
 # ---------------- UI ---------------- #
 
 company_code = st.text_input("Company Code")
 
 sd_file = st.file_uploader("Upload SD File", type="xlsx")
 sr_file = st.file_uploader("Upload SR File", type="xlsx")
-tb_file = st.file_uploader("Upload TB File", type="xlsx")
-gl_file = st.file_uploader("Upload GL Dump File", type="xlsx")
 
 # ---------------- Processing ---------------- #
 
 if st.button("Process Files"):
 
-    if not all([company_code, sd_file, sr_file, tb_file, gl_file]):
-        st.error("All inputs are mandatory")
+    if not all([company_code, sd_file, sr_file]):
+        st.error("Company Code, SD & SR files are mandatory")
         st.stop()
 
     try:
-        outputs = {}
-
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # ---------------- READ SALES REGISTER ---------------- #
-
+            # ---- Read & consolidate Sales Register ---- #
             df_sales = pd.concat(
                 [
                     normalize_columns(pd.read_excel(sd_file)),
@@ -66,40 +44,38 @@ if st.button("Process Files"):
                 ignore_index=True
             )
 
-            # ---------------- WRITE USING XLSXWRITER ---------------- #
+            output_path = os.path.join(
+                tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx"
+            )
 
-            gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-
-            workbook = xlsxwriter.Workbook(gstr_path)
+            # ---- Write using XLSXWRITER ---- #
+            workbook = xlsxwriter.Workbook(output_path)
             ws_sales = workbook.add_worksheet("Sales register")
             ws_pivot = workbook.add_worksheet("Sales summary")
 
-            # Write Sales register
-            for c, col in enumerate(df_sales.columns):
-                ws_sales.write(0, c, col)
+            # Write headers
+            for col, header in enumerate(df_sales.columns):
+                ws_sales.write(0, col, header)
 
-            for r in range(len(df_sales)):
-                for c, col in enumerate(df_sales.columns):
-                    ws_sales.write(r + 1, c, df_sales.iloc[r, c])
+            # Write data
+            for row in range(len(df_sales)):
+                for col, header in enumerate(df_sales.columns):
+                    ws_sales.write(row + 1, col, df_sales.iloc[row, col])
 
-            # Define table range
             last_row = len(df_sales)
             last_col = len(df_sales.columns) - 1
 
+            # Convert to Excel Table (mandatory for pivot)
             ws_sales.add_table(
                 0, 0, last_row, last_col,
                 {"columns": [{"header": c} for c in df_sales.columns]}
             )
 
-            # ---------------- CREATE PIVOT ---------------- #
-
-            pivot = workbook.add_pivot_table({
+            # ---- CREATE PIVOT TABLE ---- #
+            workbook.add_pivot_table({
                 "name": "SalesSummaryPivot",
-                "source": "Sales register!A1:{}{}".format(
-                    xlsxwriter.utility.xl_col_to_name(last_col),
-                    last_row + 1
-                ),
-                "destination": "Sales summary!A3",
+                "source": f"'Sales register'!A1:{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}",
+                "destination": "'Sales summary'!A3",
                 "filters": [
                     {"field": "GSTIN of Taxpayer"}
                 ],
@@ -116,22 +92,12 @@ if st.button("Process Files"):
 
             workbook.close()
 
-            with open(gstr_path, "rb") as f:
-                outputs["GSTR-1 Workbook.xlsx"] = f.read()
-
-        st.session_state.outputs = outputs
-        st.session_state.processed = True
-        st.success("Processing completed successfully")
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    "Download GSTR-1 Workbook",
+                    data=f.read(),
+                    file_name=os.path.basename(output_path)
+                )
 
     except Exception as e:
         st.error(str(e))
-
-# ---------------- Download ---------------- #
-
-if st.session_state.processed:
-    for k, v in st.session_state.outputs.items():
-        st.download_button(
-            label=f"Download {k}",
-            data=v,
-            file_name=k
-        )
