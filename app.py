@@ -135,8 +135,8 @@ if st.button("Process Files"):
                 df_tb,
                 [
                     "G/L Acct Long Text",      # ← FIXED
-                    "G/L Account: Long Text",
-                    "G/L Account Long Text",
+                    "G/L Acct: Long Text",
+                    "G/L Acct Long Text",
                 ],
                 "TB GL Text"
             )
