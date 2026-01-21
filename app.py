@@ -20,7 +20,7 @@ def normalize_columns(df):
 
 
 def sanitize_dataframe(df):
-    # Replace Inf / -Inf
+    # Replace inf / -inf
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
     # Convert datetime columns to string to avoid NaT errors
@@ -65,7 +65,7 @@ if st.button("Process Files"):
             df_gl = normalize_columns(pd.read_excel(gl_file))
             df_tb = normalize_columns(pd.read_excel(tb_file))
 
-            # ---------- SANITIZE DATA ---------- #
+            # ---------- SANITIZE ---------- #
 
             df_sales = sanitize_dataframe(df_sales)
             df_gl = sanitize_dataframe(df_gl)
@@ -163,7 +163,7 @@ if st.button("Process Files"):
                 .fillna(0)
             )
 
-            # ---------- WRITE EXCEL (XLSXWRITER) ---------- #
+            # ---------- WRITE EXCEL ---------- #
 
             output_path = os.path.join(
                 tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx"
@@ -174,16 +174,9 @@ if st.button("Process Files"):
                 {"nan_inf_to_errors": True}
             )
 
-            # ---- HARD CHECK FOR PIVOT SUPPORT ---- #
-            if not hasattr(wb, "add_pivot_table"):
-                raise RuntimeError(
-                    "Installed xlsxwriter version does not support pivot tables. "
-                    "Upgrade xlsxwriter to >= 3.1.0."
-                )
-
             ws_sales = wb.add_worksheet("Sales register")
             ws_sum = wb.add_worksheet("GST Summary")
-            ws_pivot = wb.add_worksheet("Sales summary")
+            ws_summary = wb.add_worksheet("Sales summary")
 
             # --- Sales register --- #
             for c, col in enumerate(df_sales.columns):
@@ -220,25 +213,41 @@ if st.button("Process Files"):
                     r, 3, f"=B{r+1}+C{r+1}", num_fmt
                 )
 
-            # --- Sales summary Pivot --- #
-            wb.add_pivot_table(
-                {
-                    "name": "SalesSummaryPivot",
-                    "source": (
-                        f"'Sales register'!A1:"
-                        f"{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}"
-                    ),
-                    "destination": "'Sales summary'!A3",
-                    "filters": [{"field": "GSTIN of Taxpayer"}],
-                    "rows": [{"field": "Sales summary"}],
-                    "values": [
-                        {"field": "Taxable value", "function": "sum"},
-                        {"field": "IGST Amt", "function": "sum"},
-                        {"field": "CGST Amt", "function": "sum"},
-                        {"field": "SGST/UTGST Amt", "function": "sum"},
-                    ],
-                }
-            )
+            # ---------- SALES SUMMARY (PIVOT OR FALLBACK) ---------- #
+
+            if hasattr(wb, "add_pivot_table"):
+                wb.add_pivot_table(
+                    {
+                        "name": "SalesSummaryPivot",
+                        "source": (
+                            f"'Sales register'!A1:"
+                            f"{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}"
+                        ),
+                        "destination": "'Sales summary'!A3",
+                        "filters": [{"field": "GSTIN of Taxpayer"}],
+                        "rows": [{"field": "Sales summary"}],
+                        "values": [
+                            {"field": "Taxable value", "function": "sum"},
+                            {"field": "IGST Amt", "function": "sum"},
+                            {"field": "CGST Amt", "function": "sum"},
+                            {"field": "SGST/UTGST Amt", "function": "sum"},
+                        ],
+                    }
+                )
+            else:
+                static_summary = (
+                    df_sales
+                    .groupby(["GSTIN of Taxpayer", "Sales summary"], as_index=False)
+                    [["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]]
+                    .sum()
+                )
+
+                for c, col in enumerate(static_summary.columns):
+                    ws_summary.write(0, c, col)
+
+                for r in range(len(static_summary)):
+                    for c, col in enumerate(static_summary.columns):
+                        ws_summary.write(r + 1, c, static_summary.iloc[r, c])
 
             wb.close()
 
@@ -251,4 +260,5 @@ if st.button("Process Files"):
 
     except Exception as e:
         st.error(str(e))
+
 
