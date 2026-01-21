@@ -105,6 +105,43 @@ if st.button("Process Files"):
             df_gst = df_gl[df_gl[gl_text_col].isin(gst_accounts)]
             df_revenue = df_gl[df_gl[gl_account_col].astype(str).str.startswith("3")]
 
+            # ---------- TB ---------- #
+
+            df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
+
+            tb_text_col = find_column_by_keywords(df_tb, ["g/l", "acct", "long", "text"], "TB GL Text")
+            debit_col = find_column_by_keywords(df_tb, ["period", "d"], "TB Debit")
+            credit_col = find_column_by_keywords(df_tb, ["period", "c"], "TB Credit")
+
+            df_tb_gst = df_tb[df_tb[tb_text_col].isin(gst_accounts)].copy()
+            df_tb_gst["Difference as per TB"] = df_tb_gst[credit_col] - df_tb_gst[debit_col]
+
+            # ---------- GST SUMMARY DATA ---------- #
+
+            gst_summary_df = (
+                df_gst
+                .groupby(gl_text_col, as_index=False)[value_col]
+                .sum()
+                .rename(columns={
+                    gl_text_col: "GST Type",
+                    value_col: "GST Payable as per GL"
+                })
+            )
+
+            tb_summary_df = (
+                df_tb_gst
+                .groupby(tb_text_col, as_index=False)["Difference as per TB"]
+                .sum()
+                .rename(columns={tb_text_col: "GST Type"})
+            )
+
+            summary_df = pd.merge(
+                gst_summary_df,
+                tb_summary_df,
+                on="GST Type",
+                how="left"
+            ).fillna(0)
+
             # ---------- GSTR-1 WORKBOOK ---------- #
 
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
@@ -113,50 +150,18 @@ if st.button("Process Files"):
                 df_sales.to_excel(writer, sheet_name="Sales register", index=False)
                 df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
                 df_gst.to_excel(writer, sheet_name="GST payable", index=False)
+                summary_df.to_excel(writer, sheet_name="GST Summary", index=False)
 
-            # ---------- ADD VLOOKUPS (CORRECTED) ---------- #
+            # ---------- ADD EXCEL FORMULAS ---------- #
 
             wb = load_workbook(gstr_path)
-            ws_sales = wb["Sales register"]
-            ws_rev = wb["Revenue"]
-            ws_gst = wb["GST payable"]
+            ws_summary = wb["GST Summary"]
 
-            # Identify columns dynamically
-            sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
-            rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
-            gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
-
-            # Add lookup columns to Sales register
-            sales_last_col = ws_sales.max_column
-            ws_sales.cell(1, sales_last_col + 1, "Revenue VLOOKUP")
-            ws_sales.cell(1, sales_last_col + 2, "GST Payable VLOOKUP")
-
-            for r in range(2, ws_sales.max_row + 1):
-                ws_sales.cell(
-                    r, sales_last_col + 1,
-                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},Revenue!{rev_doc_col}:{rev_doc_col},1,FALSE),"Not Found")'
-                )
-                ws_sales.cell(
-                    r, sales_last_col + 2,
-                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
-                )
-
-            # Cross lookup: Revenue → Sales register
-            rev_last_col = ws_rev.max_column
-            ws_rev.cell(1, rev_last_col + 1, "Sales Register VLOOKUP")
-            for r in range(2, ws_rev.max_row + 1):
-                ws_rev.cell(
-                    r, rev_last_col + 1,
-                    f'=IFERROR(VLOOKUP({rev_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
-                )
-
-            # Cross lookup: GST payable → Sales register
-            gst_last_col = ws_gst.max_column
-            ws_gst.cell(1, gst_last_col + 1, "Sales Register VLOOKUP")
-            for r in range(2, ws_gst.max_row + 1):
-                ws_gst.cell(
-                    r, gst_last_col + 1,
-                    f'=IFERROR(VLOOKUP({gst_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
+            ws_summary.cell(1, 4, "Net Difference")
+            for r in range(2, ws_summary.max_row + 1):
+                ws_summary.cell(
+                    r, 4,
+                    f"=B{r}+C{r}"
                 )
 
             wb.save(gstr_path)
@@ -181,6 +186,7 @@ if st.session_state.processed:
             file_name=filename,
             key=filename
         )
+
 
 
 
