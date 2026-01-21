@@ -136,7 +136,7 @@ if st.button("Process Files"):
 
             tb_text_col = find_column_by_keywords(
                 df_tb,
-                ["g/l", "acct", "long", "text"],   # ← HARDENED FIX
+                ["g/l", "long", "text"],  # ← UPDATED: Removed "acct" for flexibility (handles "Acct" or "Account" variations)
                 "TB GL Long Text"
             )
 
