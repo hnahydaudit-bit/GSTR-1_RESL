@@ -10,8 +10,7 @@ st.title("GSTR-1 Excel Processor")
 
 def normalize_columns(df):
     df.columns = (
-        df.columns
-        .astype(str)
+        df.columns.astype(str)
         .str.strip()
         .str.replace(r"\s+", " ", regex=True)
     )
@@ -65,7 +64,7 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD + SR Consolidation ---------- #
+            # ---------- SD + SR ---------- #
 
             df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
             df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
@@ -80,7 +79,7 @@ if st.button("Process Files"):
             )
             df_consolidated.to_excel(consolidated_path, index=False)
 
-            # ---------- GL Processing ---------- #
+            # ---------- GL ---------- #
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
@@ -89,18 +88,13 @@ if st.button("Process Files"):
                 [
                     "G/L Account: Long Text",
                     "G/L Account Long Text",
-                    "GL Account Long Text",
-                    "G/L Account Text",
                 ],
                 "GL Account Long Text"
             )
 
             gl_account_col = find_column(
                 df_gl,
-                [
-                    "G/L Account",
-                    "GL Account",
-                ],
+                ["G/L Account", "GL Account"],
                 "GL Account"
             )
 
@@ -111,7 +105,7 @@ if st.button("Process Files"):
                     "Amount in Company Code Currency",
                     "Amount",
                 ],
-                "Company Code Currency Value"
+                "GL Amount"
             )
 
             gst_accounts = [
@@ -133,16 +127,16 @@ if st.button("Process Files"):
                 df_gst.to_excel(writer, sheet_name="GST Payable", index=False)
                 df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
 
-            # ---------- TB Summary ---------- #
+            # ---------- TB ---------- #
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
             tb_text_col = find_column(
                 df_tb,
                 [
+                    "G/L Acct: Long Text",      # ← FIXED
                     "G/L Account: Long Text",
                     "G/L Account Long Text",
-                    "GL Account Long Text",
                 ],
                 "TB GL Text"
             )
