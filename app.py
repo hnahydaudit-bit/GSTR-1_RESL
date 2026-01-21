@@ -134,7 +134,7 @@ if st.button("Process Files"):
             tb_text_col = find_column(
                 df_tb,
                 [
-                    "G/L Acct: Long Text",      # ← FIXED
+                    "G/L Acct Long Text",      # ← FIXED
                     "G/L Account: Long Text",
                     "G/L Account Long Text",
                 ],
