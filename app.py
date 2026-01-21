@@ -151,7 +151,7 @@ if st.button("Process Files"):
                 df_gst.to_excel(writer, sheet_name="GST payable", index=False)
                 summary_df.to_excel(writer, sheet_name="GST Summary", index=False)
 
-            # ---------- POST-PROCESSING IN EXCEL ---------- #
+            # ---------- POST PROCESSING IN EXCEL ---------- #
 
             wb = load_workbook(gstr_path)
             ws_sales = wb["Sales register"]
@@ -159,44 +159,55 @@ if st.button("Process Files"):
             ws_gst = wb["GST payable"]
             ws_summary = wb["GST Summary"]
 
-            # ---- NEGATIVE VALUES FOR CREDIT NOTES ---- #
+            # ---- Negative values for Credit Notes ---- #
 
             doc_type_col = get_column_letter_by_header(ws_sales, "Document Type")
-            amount_cols = [
-                "Taxable value",
-                "IGST Amt",
-                "CGST Amt",
-                "SGST/UTGST Amt",
-            ]
-            amount_col_letters = [
-                get_column_letter_by_header(ws_sales, col)
-                for col in amount_cols
-            ]
+            amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
+            amount_col_letters = [get_column_letter_by_header(ws_sales, c) for c in amount_cols]
 
             for r in range(2, ws_sales.max_row + 1):
                 if ws_sales[f"{doc_type_col}{r}"].value == "C":
-                    for col_letter in amount_col_letters:
-                        cell = ws_sales[f"{col_letter}{r}"]
+                    for c in amount_col_letters:
+                        cell = ws_sales[f"{c}{r}"]
                         if isinstance(cell.value, (int, float)):
                             cell.value = -abs(cell.value)
 
-            # ---- VLOOKUPS (unchanged, already correct) ---- #
+            # ---- SALES SUMMARY COLUMN (NEW FEATURE) ---- #
+
+            inv_type_col = get_column_letter_by_header(ws_sales, "Invoice type")
+            tax_rate_col = get_column_letter_by_header(ws_sales, "Tax rate")
+
+            sales_last_col = ws_sales.max_column
+            ws_sales.cell(1, sales_last_col + 1, "Sales summary")
+
+            for r in range(2, ws_sales.max_row + 1):
+                ws_sales.cell(
+                    r, sales_last_col + 1,
+                    f'=IF({inv_type_col}{r}="SEWOP","SEZWOP",'
+                    f'IF({inv_type_col}{r}="SEWP","SEWP",'
+                    f'IF(AND({inv_type_col}{r}<>"SEWOP",{inv_type_col}{r}<>"SEWP",{tax_rate_col}{r}=0),"Exempt supply",'
+                    f'IF(AND({inv_type_col}{r}="B2B",{doc_type_col}{r}="C",{tax_rate_col}{r}<>0),"B2B Credit Notes",'
+                    f'IF(AND({inv_type_col}{r}="B2B",{doc_type_col}{r}<>"C",{tax_rate_col}{r}<>0),"B2B Supplies",'
+                    f'IF(AND({inv_type_col}{r}="B2C",{tax_rate_col}{r}<>0),"B2C Supplies",""))))))'
+                )
+
+            # ---- VLOOKUPS (already correct) ---- #
 
             sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
             rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
             gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
 
-            sales_last_col = ws_sales.max_column
-            ws_sales.cell(1, sales_last_col + 1, "Revenue VLOOKUP")
-            ws_sales.cell(1, sales_last_col + 2, "GST Payable VLOOKUP")
+            lookup_start_col = ws_sales.max_column + 1
+            ws_sales.cell(1, lookup_start_col, "Revenue VLOOKUP")
+            ws_sales.cell(1, lookup_start_col + 1, "GST Payable VLOOKUP")
 
             for r in range(2, ws_sales.max_row + 1):
                 ws_sales.cell(
-                    r, sales_last_col + 1,
+                    r, lookup_start_col,
                     f'=IFERROR(VLOOKUP({sales_lookup_col}{r},Revenue!{rev_doc_col}:{rev_doc_col},1,FALSE),"Not Found")'
                 )
                 ws_sales.cell(
-                    r, sales_last_col + 2,
+                    r, lookup_start_col + 1,
                     f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
                 )
 
