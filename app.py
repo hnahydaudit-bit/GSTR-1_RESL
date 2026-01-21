@@ -18,6 +18,17 @@ def normalize_columns(df):
     )
     return df
 
+def sanitize_dataframe(df):
+    # Replace Inf / -Inf
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Handle datetime columns safely
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime("%Y-%m-%d")
+    df.fillna("", inplace=True)
+    return df
+
 # ---------------- UI ---------------- #
 
 company_code = st.text_input("Company Code")
@@ -38,7 +49,7 @@ if st.button("Process Files"):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # ---------- READ INPUT FILES ---------- #
+            # ---------- READ FILES ---------- #
 
             df_sales = pd.concat(
                 [
@@ -51,30 +62,27 @@ if st.button("Process Files"):
             df_gl = normalize_columns(pd.read_excel(gl_file))
             df_tb = normalize_columns(pd.read_excel(tb_file))
 
-            # ---------- SANITIZE NUMERIC DATA (CRITICAL) ---------- #
+            # ---------- SANITIZE ALL DATAFRAMES ---------- #
 
-            df_sales.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df_gl.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df_tb.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_sales = sanitize_dataframe(df_sales)
+            df_gl = sanitize_dataframe(df_gl)
+            df_tb = sanitize_dataframe(df_tb)
 
             # ---------- CREDIT NOTE NEGATIVES ---------- #
 
             amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
-            cn_mask = df_sales["Document Type"] == "C"
+            df_sales["Document Type"] = df_sales["Document Type"].astype(str)
 
             for col in amount_cols:
                 df_sales[col] = pd.to_numeric(df_sales[col], errors="coerce").fillna(0)
-                df_sales.loc[cn_mask, col] = -df_sales.loc[cn_mask, col].abs()
+                df_sales.loc[df_sales["Document Type"] == "C", col] *= -1
 
             # ---------- SALES SUMMARY CLASSIFICATION ---------- #
 
             df_sales["Tax rate"] = pd.to_numeric(df_sales["Tax rate"], errors="coerce").fillna(0)
 
             def classify(row):
-                it = row["Invoice type"]
-                dt = row["Document Type"]
-                tr = row["Tax rate"]
-
+                it, dt, tr = row["Invoice type"], row["Document Type"], row["Tax rate"]
                 if it == "SEWOP":
                     return "SEZWOP"
                 if it == "SEWP":
@@ -105,11 +113,11 @@ if st.button("Process Files"):
 
             df_gst = df_gl[df_gl["G/L Account: Long Text"].isin(gst_accounts)]
 
+            df_tb["Period 09 C"] = pd.to_numeric(df_tb["Period 09 C"], errors="coerce").fillna(0)
+            df_tb["Period 09 D"] = pd.to_numeric(df_tb["Period 09 D"], errors="coerce").fillna(0)
+
             df_tb_gst = df_tb[df_tb["G/L Acct Long Text"].isin(gst_accounts)].copy()
-            df_tb_gst["Difference as per TB"] = (
-                pd.to_numeric(df_tb_gst["Period 09 C"], errors="coerce").fillna(0)
-                - pd.to_numeric(df_tb_gst["Period 09 D"], errors="coerce").fillna(0)
-            )
+            df_tb_gst["Difference as per TB"] = df_tb_gst["Period 09 C"] - df_tb_gst["Period 09 D"]
 
             summary_df = (
                 df_gst
@@ -130,19 +138,16 @@ if st.button("Process Files"):
                 .fillna(0)
             )
 
-            # ---------- WRITE EXCEL (XLSXWRITER SAFE MODE) ---------- #
+            # ---------- WRITE EXCEL ---------- #
 
             output_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-            wb = xlsxwriter.Workbook(
-                output_path,
-                {"nan_inf_to_errors": True}
-            )
+            wb = xlsxwriter.Workbook(output_path, {"nan_inf_to_errors": True})
 
             ws_sales = wb.add_worksheet("Sales register")
             ws_sum = wb.add_worksheet("GST Summary")
             ws_pivot = wb.add_worksheet("Sales summary")
 
-            # --- Sales register --- #
+            # Sales register
             for c, col in enumerate(df_sales.columns):
                 ws_sales.write(0, c, col)
             for r in range(len(df_sales)):
@@ -157,7 +162,7 @@ if st.button("Process Files"):
                 {"columns": [{"header": c} for c in df_sales.columns]}
             )
 
-            # --- GST Summary --- #
+            # GST Summary
             for c, col in enumerate(summary_df.columns):
                 ws_sum.write(0, c, col)
             for r in range(len(summary_df)):
@@ -169,7 +174,7 @@ if st.button("Process Files"):
             for r in range(1, len(summary_df) + 1):
                 ws_sum.write_formula(r, 3, f"=B{r+1}+C{r+1}", num_fmt)
 
-            # --- Pivot table --- #
+            # Pivot
             wb.add_pivot_table({
                 "name": "SalesSummaryPivot",
                 "source": f"'Sales register'!A1:{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}",
