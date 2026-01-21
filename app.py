@@ -28,7 +28,7 @@ def find_column_by_keywords(df, keywords, label):
         f"Found columns: {list(df.columns)}"
     )
 
-# ---------------- Session state ---------------- #
+# ---------------- Session State ---------------- #
 
 if "processed" not in st.session_state:
     st.session_state.processed = False
@@ -71,29 +71,12 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD (normal read) ---------- #
+            # ---------- SD + SR CONSOLIDATION ---------- #
 
-            df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"], header=0))
+            df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
+            df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
 
-            # ---------- SR (FORCED SAFE READ) ---------- #
-            # Read everything as raw data
-            df_sr_raw = pd.read_excel(paths["sr.xlsx"], header=None)
-
-            # First row is header – extract it
-            sr_headers = (
-                df_sr_raw.iloc[0]
-                .astype(str)
-                .str.strip()
-                .str.replace(r"\s+", " ", regex=True)
-            )
-
-            # Remaining rows are ALL data rows (including first data row)
-            df_sr = df_sr_raw.iloc[1:].copy()
-            df_sr.columns = sr_headers
-            df_sr.reset_index(drop=True, inplace=True)
-
-            # ---------- CONSOLIDATION (GUARANTEED) ---------- #
-
+            # Take ALL SD rows + ALL SR rows
             df_consolidated = pd.concat(
                 [df_sd, df_sr],
                 ignore_index=True
@@ -104,26 +87,20 @@ if st.button("Process Files"):
             )
             df_consolidated.to_excel(consolidated_path, index=False)
 
-            # ---------- GL ---------- #
+            # ---------- GL PROCESSING ---------- #
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
             gl_text_col = find_column_by_keywords(
-                df_gl,
-                ["g/l", "account", "long", "text"],
-                "GL Long Text"
+                df_gl, ["g/l", "account", "long", "text"], "GL Long Text"
             )
 
             gl_account_col = find_column_by_keywords(
-                df_gl,
-                ["g/l", "account"],
-                "GL Account"
+                df_gl, ["g/l", "account"], "GL Account"
             )
 
             value_col = find_column_by_keywords(
-                df_gl,
-                ["value"],
-                "GL Amount"
+                df_gl, ["value"], "GL Amount"
             )
 
             gst_accounts = [
@@ -145,26 +122,20 @@ if st.button("Process Files"):
                 df_gst.to_excel(writer, sheet_name="GST Payable", index=False)
                 df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
 
-            # ---------- TB ---------- #
+            # ---------- TB PROCESSING ---------- #
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
             tb_text_col = find_column_by_keywords(
-                df_tb,
-                ["g/l", "acct", "long", "text"],
-                "TB GL Long Text"
+                df_tb, ["g/l", "acct", "long", "text"], "TB GL Long Text"
             )
 
             debit_col = find_column_by_keywords(
-                df_tb,
-                ["period", "d"],
-                "TB Debit"
+                df_tb, ["period", "d"], "TB Debit"
             )
 
             credit_col = find_column_by_keywords(
-                df_tb,
-                ["period", "c"],
-                "TB Credit"
+                df_tb, ["period", "c"], "TB Credit"
             )
 
             df_tb_gst = df_tb[df_tb[tb_text_col].isin(gst_accounts)].copy()
@@ -172,19 +143,38 @@ if st.button("Process Files"):
                 df_tb_gst[credit_col] - df_tb_gst[debit_col]
             )
 
-            gst_summary = (
-                df_gst.groupby(gl_text_col)[value_col].sum()
+            # ---------- SUMMARY (MERGE-BASED FIX) ---------- #
+
+            gst_summary_df = (
+                df_gst
+                .groupby(gl_text_col, as_index=False)[value_col]
+                .sum()
+                .rename(columns={
+                    gl_text_col: "GST Type",
+                    value_col: "GST Payable as per GL"
+                })
             )
 
-            tb_summary = (
-                df_tb_gst.groupby(tb_text_col)["Difference"].sum()
+            tb_summary_df = (
+                df_tb_gst
+                .groupby(tb_text_col, as_index=False)["Difference"]
+                .sum()
+                .rename(columns={
+                    tb_text_col: "GST Type",
+                    "Difference": "Difference as per TB"
+                })
             )
 
-            summary_df = pd.DataFrame({
-                "GST Type": gst_summary.index,
-                "GST Payable as per GL": gst_summary.values,
-                "Difference as per TB": tb_summary.reindex(gst_summary.index).values,
-            })
+            summary_df = pd.merge(
+                gst_summary_df,
+                tb_summary_df,
+                on="GST Type",
+                how="left"
+            )
+
+            summary_df["Difference as per TB"] = (
+                summary_df["Difference as per TB"].fillna(0)
+            )
 
             summary_df["Net Difference"] = (
                 summary_df["GST Payable as per GL"]
