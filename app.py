@@ -74,7 +74,6 @@ if st.button("Process Files"):
             # ---------- CREDIT NOTE NEGATIVES ---------- #
 
             amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
-
             df_sales["Document Type"] = df_sales["Document Type"].astype(str)
 
             for col in amount_cols:
@@ -179,14 +178,14 @@ if st.button("Process Files"):
             if not hasattr(wb, "add_pivot_table"):
                 raise RuntimeError(
                     "Installed xlsxwriter version does not support pivot tables. "
-                    "Please upgrade xlsxwriter to >= 3.1.0."
+                    "Upgrade xlsxwriter to >= 3.1.0."
                 )
 
             ws_sales = wb.add_worksheet("Sales register")
             ws_sum = wb.add_worksheet("GST Summary")
             ws_pivot = wb.add_worksheet("Sales summary")
 
-            # --- Sales register sheet --- #
+            # --- Sales register --- #
             for c, col in enumerate(df_sales.columns):
                 ws_sales.write(0, c, col)
 
@@ -205,7 +204,7 @@ if st.button("Process Files"):
                 {"columns": [{"header": c} for c in df_sales.columns]},
             )
 
-            # --- GST Summary sheet --- #
+            # --- GST Summary --- #
             for c, col in enumerate(summary_df.columns):
                 ws_sum.write(0, c, col)
 
@@ -252,3 +251,4 @@ if st.button("Process Files"):
 
     except Exception as e:
         st.error(str(e))
+
