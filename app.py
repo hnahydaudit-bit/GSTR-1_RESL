@@ -73,25 +73,14 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD + SR ---------- #
+            # ---------- SD + SR CONSOLIDATION ---------- #
 
             df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
             df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
 
-            df_consolidated = pd.concat(
-                [df_sd, df_sr],
-                ignore_index=True
-            )
+            df_sales = pd.concat([df_sd, df_sr], ignore_index=True)
 
-            consolidated_path = os.path.join(
-                tmpdir, f"{company_code}_SD_SR_Consolidated.xlsx"
-            )
-            df_consolidated.to_excel(consolidated_path, index=False)
-
-            with open(consolidated_path, "rb") as f:
-                outputs["SD-SR Consolidated.xlsx"] = f.read()
-
-            # ---------- GL ---------- #
+            # ---------- GL PROCESSING ---------- #
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
@@ -104,6 +93,9 @@ if st.button("Process Files"):
             value_col = find_column_by_keywords(
                 df_gl, ["value"], "GL Amount"
             )
+            doc_col_gl = find_column_by_keywords(
+                df_gl, ["document"], "GL Document Number"
+            )
 
             gst_accounts = [
                 "Central GST Payable",
@@ -111,82 +103,52 @@ if st.button("Process Files"):
                 "State GST Payable",
             ]
 
-            df_gst = df_gl[df_gl[gl_text_col].isin(gst_accounts)]
+            df_gst = df_gl[df_gl[gl_text_col].isin(gst_accounts)].copy()
             df_revenue = df_gl[
                 df_gl[gl_account_col].astype(str).str.startswith("3")
-            ]
+            ].copy()
+
+            # ---------- LOOKUPS ---------- #
+
+            generic_field_col = find_column_by_keywords(
+                df_sales, ["generic", "8"], "Generic Field 8"
+            )
+
+            revenue_doc_set = set(df_revenue[doc_col_gl].astype(str))
+            gst_doc_set = set(df_gst[doc_col_gl].astype(str))
+
+            df_sales["Match with Revenue (Doc No)"] = (
+                df_sales[generic_field_col].astype(str)
+                .isin(revenue_doc_set)
+                .map({True: "Yes", False: "No"})
+            )
+
+            df_sales["Match with GST Payable (Doc No)"] = (
+                df_sales[generic_field_col].astype(str)
+                .isin(gst_doc_set)
+                .map({True: "Yes", False: "No"})
+            )
+
+            # ---------- GSTR-1 WORKBOOK ---------- #
 
             gstr_path = os.path.join(
                 tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx"
             )
 
             with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
-                df_gst.to_excel(writer, sheet_name="GST Payable", index=False)
-                df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
+                df_sales.to_excel(
+                    writer, sheet_name="Sales register", index=False
+                )
+                df_revenue.to_excel(
+                    writer, sheet_name="Revenue", index=False
+                )
+                df_gst.to_excel(
+                    writer, sheet_name="GST Payable", index=False
+                )
 
             with open(gstr_path, "rb") as f:
                 outputs["GSTR-1 Workbook.xlsx"] = f.read()
 
-            # ---------- TB + SUMMARY ---------- #
-
-            df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
-
-            tb_text_col = find_column_by_keywords(
-                df_tb, ["g/l", "acct", "long", "text"], "TB GL Long Text"
-            )
-            debit_col = find_column_by_keywords(
-                df_tb, ["period", "d"], "TB Debit"
-            )
-            credit_col = find_column_by_keywords(
-                df_tb, ["period", "c"], "TB Credit"
-            )
-
-            df_tb_gst = df_tb[df_tb[tb_text_col].isin(gst_accounts)].copy()
-            df_tb_gst["Difference"] = (
-                df_tb_gst[credit_col] - df_tb_gst[debit_col]
-            )
-
-            gst_summary_df = (
-                df_gst
-                .groupby(gl_text_col, as_index=False)[value_col]
-                .sum()
-                .rename(columns={
-                    gl_text_col: "GST Type",
-                    value_col: "GST Payable as per GL"
-                })
-            )
-
-            tb_summary_df = (
-                df_tb_gst
-                .groupby(tb_text_col, as_index=False)["Difference"]
-                .sum()
-                .rename(columns={
-                    tb_text_col: "GST Type",
-                    "Difference": "Difference as per TB"
-                })
-            )
-
-            summary_df = pd.merge(
-                gst_summary_df,
-                tb_summary_df,
-                on="GST Type",
-                how="left"
-            ).fillna(0)
-
-            summary_df["Net Difference"] = (
-                summary_df["GST Payable as per GL"]
-                - summary_df["Difference as per TB"]
-            )
-
-            summary_path = os.path.join(
-                tmpdir, f"{company_code}_Summary.xlsx"
-            )
-            summary_df.to_excel(summary_path, index=False)
-
-            with open(summary_path, "rb") as f:
-                outputs["Summary.xlsx"] = f.read()
-
-        # store BYTES, not paths
         st.session_state.outputs = outputs
         st.session_state.processed = True
         st.success("Processing completed successfully")
@@ -206,5 +168,6 @@ if st.session_state.processed:
             file_name=filename,
             key=filename
         )
+
 
 
