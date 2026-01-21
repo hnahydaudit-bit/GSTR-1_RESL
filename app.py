@@ -3,6 +3,9 @@ import pandas as pd
 import os
 import tempfile
 from openpyxl import load_workbook
+from openpyxl.worksheet.table import Table
+from openpyxl.utils import get_column_letter
+from openpyxl.pivot.table import PivotTable, PivotCache, PivotCacheDefinition
 
 st.set_page_config(page_title="GSTR-1 Processor", layout="centered")
 st.title("GSTR-1 Excel Processor")
@@ -17,20 +20,17 @@ def normalize_columns(df):
     )
     return df
 
-
 def find_column_by_keywords(df, keywords, label):
     for col in df.columns:
-        col_l = col.lower()
-        if all(k.lower() in col_l for k in keywords):
+        if all(k.lower() in col.lower() for k in keywords):
             return col
     raise KeyError(f"{label} column not found")
 
-
-def get_column_letter_by_header(ws, header_name):
-    for col in range(1, ws.max_column + 1):
-        if ws.cell(row=1, column=col).value == header_name:
-            return ws.cell(row=1, column=col).column_letter
-    raise KeyError(f"Column '{header_name}' not found in {ws.title}")
+def get_column_letter_by_header(ws, header):
+    for c in range(1, ws.max_column + 1):
+        if ws.cell(1, c).value == header:
+            return ws.cell(1, c).column_letter
+    raise KeyError(f"{header} not found in {ws.title}")
 
 # ---------------- Session State ---------------- #
 
@@ -82,145 +82,51 @@ if st.button("Process Files"):
                 ignore_index=True
             )
 
-            # ---------- GL ---------- #
-
-            df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
-
-            gl_text = find_column_by_keywords(df_gl, ["g/l", "long", "text"], "GL Text")
-            gl_acct = find_column_by_keywords(df_gl, ["g/l", "account"], "GL Account")
-            val_col = find_column_by_keywords(df_gl, ["value"], "Amount")
-            doc_col = find_column_by_keywords(df_gl, ["document"], "Document")
-
-            gst_accounts = [
-                "Central GST Payable",
-                "Integrated GST Payable",
-                "State GST Payable",
-            ]
-
-            df_gst = df_gl[df_gl[gl_text].isin(gst_accounts)]
-            df_rev = df_gl[df_gl[gl_acct].astype(str).str.startswith("3")]
-
-            # ---------- TB ---------- #
-
-            df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
-            tb_text = find_column_by_keywords(df_tb, ["g/l", "acct", "long"], "TB Text")
-            debit = find_column_by_keywords(df_tb, ["period", "d"], "Debit")
-            credit = find_column_by_keywords(df_tb, ["period", "c"], "Credit")
-
-            df_tb_gst = df_tb[df_tb[tb_text].isin(gst_accounts)].copy()
-            df_tb_gst["Difference as per TB"] = df_tb_gst[credit] - df_tb_gst[debit]
-
-            # ---------- GST SUMMARY ---------- #
-
-            summary_df = pd.merge(
-                df_gst.groupby(gl_text, as_index=False)[val_col].sum()
-                .rename(columns={gl_text: "GST Type", val_col: "GST Payable as per GL"}),
-                df_tb_gst.groupby(tb_text, as_index=False)["Difference as per TB"].sum()
-                .rename(columns={tb_text: "GST Type"}),
-                on="GST Type",
-                how="left"
-            ).fillna(0)
-
-            # ---------- WRITE WORKBOOK ---------- #
+            # ---------- WRITE BASE WORKBOOK ---------- #
 
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-
             with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
                 df_sales.to_excel(writer, "Sales register", index=False)
-                df_rev.to_excel(writer, "Revenue", index=False)
-                df_gst.to_excel(writer, "GST payable", index=False)
-                summary_df.to_excel(writer, "GST Summary", index=False)
 
             # ---------- EXCEL POST PROCESS ---------- #
 
             wb = load_workbook(gstr_path)
-            ws_sales = wb["Sales register"]
-            ws_rev = wb["Revenue"]
-            ws_gst = wb["GST payable"]
-            ws_sum = wb["GST Summary"]
+            ws = wb["Sales register"]
 
-            # --- CREDIT NOTE NEGATIVES --- #
+            # Convert Sales register into Excel Table (required for pivot)
+            end_col = get_column_letter(ws.max_column)
+            end_row = ws.max_row
+            table = Table(displayName="SalesRegisterTable", ref=f"A1:{end_col}{end_row}")
+            ws.add_table(table)
 
-            doc_type = get_column_letter_by_header(ws_sales, "Document Type")
-            amt_cols = [
-                "Taxable value",
-                "IGST Amt",
-                "CGST Amt",
-                "SGST/UTGST Amt"
-            ]
-            amt_letters = [get_column_letter_by_header(ws_sales, c) for c in amt_cols]
+            # ---------- CREATE PIVOT ---------- #
 
-            for r in range(2, ws_sales.max_row + 1):
-                if ws_sales[f"{doc_type}{r}"].value == "C":
-                    for c in amt_letters:
-                        if isinstance(ws_sales[f"{c}{r}"].value, (int, float)):
-                            ws_sales[f"{c}{r}"].value *= -1
+            pivot_cache = PivotCacheDefinition(
+                cacheId=1,
+                sourceRef=f"SalesRegisterTable"
+            )
 
-            # --- SALES SUMMARY COLUMN --- #
+            pivot_table = PivotTable(
+                name="SalesSummaryPivot",
+                cacheId=1,
+                ref="A3"
+            )
 
-            inv = get_column_letter_by_header(ws_sales, "Invoice type")
-            tax = get_column_letter_by_header(ws_sales, "Tax rate")
+            # Filters
+            pivot_table.addReportFilter("GSTIN of Taxpayer")
 
-            ss_col = ws_sales.max_column + 1
-            ws_sales.cell(1, ss_col, "Sales summary")
+            # Rows
+            pivot_table.addRowField("Sales summary")
 
-            for r in range(2, ws_sales.max_row + 1):
-                it = ws_sales[f"{inv}{r}"].value
-                dt = ws_sales[f"{doc_type}{r}"].value
-                tr = float(ws_sales[f"{tax}{r}"].value or 0)
+            # Values (order preserved)
+            pivot_table.addDataField("Taxable value", "Sum of Taxable value")
+            pivot_table.addDataField("IGST Amt", "Sum of IGST Amt")
+            pivot_table.addDataField("CGST Amt", "Sum of CGST Amt")
+            pivot_table.addDataField("SGST/UTGST Amt", "Sum of SGST/UTGST Amt")
 
-                val = ""
-                if it == "SEWOP":
-                    val = "SEZWOP"
-                elif it == "SEWP":
-                    val = "SEWP"
-                elif it not in ("SEWOP", "SEWP") and tr == 0:
-                    val = "Exempt supply"
-                elif it == "B2B" and dt == "C" and tr != 0:
-                    val = "B2B Credit Notes"
-                elif it == "B2B" and dt != "C" and tr != 0:
-                    val = "B2B Supplies"
-                elif it == "B2CS" and tr != 0:
-                    val = "B2C Supplies"
-
-                ws_sales.cell(r, ss_col, val)
-
-            # --- VLOOKUPS --- #
-
-            gf8 = get_column_letter_by_header(ws_sales, "Generic Field 8")
-            rev_doc = get_column_letter_by_header(ws_rev, "Document Number")
-            gst_doc = get_column_letter_by_header(ws_gst, "Document Number")
-
-            sr_last = ws_sales.max_column
-            ws_sales.cell(1, sr_last + 1, "Revenue VLOOKUP")
-            ws_sales.cell(1, sr_last + 2, "GST Payable VLOOKUP")
-
-            for r in range(2, ws_sales.max_row + 1):
-                ws_sales.cell(r, sr_last + 1,
-                    f'=IFERROR(VLOOKUP({gf8}{r},Revenue!{rev_doc}:{rev_doc},1,FALSE),"Not Found")')
-                ws_sales.cell(r, sr_last + 2,
-                    f'=IFERROR(VLOOKUP({gf8}{r},\'GST payable\'!{gst_doc}:{gst_doc},1,FALSE),"Not Found")')
-
-            # --- CROSS LOOKUPS --- #
-
-            rl = ws_rev.max_column + 1
-            ws_rev.cell(1, rl, "Sales Register VLOOKUP")
-            for r in range(2, ws_rev.max_row + 1):
-                ws_rev.cell(r, rl,
-                    f'=IFERROR(VLOOKUP({rev_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
-
-            gl = ws_gst.max_column + 1
-            ws_gst.cell(1, gl, "Sales Register VLOOKUP")
-            for r in range(2, ws_gst.max_row + 1):
-                ws_gst.cell(r, gl,
-                    f'=IFERROR(VLOOKUP({gst_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
-
-            # --- NET DIFFERENCE --- #
-
-            ws_sum.cell(1, 4, "Net Difference")
-            for r in range(2, ws_sum.max_row + 1):
-                c = ws_sum.cell(r, 4, f"=B{r}+C{r}")
-                c.number_format = "0.00"
+            pivot_ws = wb.create_sheet("Sales summary")
+            pivot_ws._pivots.append(pivot_table)
+            wb._pivots.append(pivot_cache)
 
             wb.save(gstr_path)
 
