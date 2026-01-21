@@ -1,12 +1,11 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import tempfile
 import os
-import xlsxwriter
+import tempfile
+from openpyxl import load_workbook
 
 st.set_page_config(page_title="GSTR-1 Processor", layout="centered")
-st.title("GSTR-1 Processor")
+st.title("GSTR-1 Excel Processor")
 
 # ---------------- Utilities ---------------- #
 
@@ -19,14 +18,25 @@ def normalize_columns(df):
     return df
 
 
-def sanitize_dataframe(df):
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+def find_column_by_keywords(df, keywords, label):
     for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            df[col] = df[col].dt.strftime("%Y-%m-%d")
-    df.fillna("", inplace=True)
-    return df
+        col_l = col.lower()
+        if all(k.lower() in col_l for k in keywords):
+            return col
+    raise KeyError(f"{label} column not found")
 
+
+def get_column_letter_by_header(ws, header_name):
+    for col in range(1, ws.max_column + 1):
+        if ws.cell(row=1, column=col).value == header_name:
+            return ws.cell(row=1, column=col).column_letter
+    raise KeyError(f"Column '{header_name}' not found in {ws.title}")
+
+# ---------------- Session State ---------------- #
+
+if "processed" not in st.session_state:
+    st.session_state.processed = False
+    st.session_state.outputs = {}
 
 # ---------------- UI ---------------- #
 
@@ -45,156 +55,191 @@ if st.button("Process Files"):
         st.error("All inputs are mandatory")
         st.stop()
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    try:
+        outputs = {}
 
-        # ---------- READ FILES ---------- #
+        with tempfile.TemporaryDirectory() as tmpdir:
 
-        df_sales = pd.concat(
-            [
-                normalize_columns(pd.read_excel(sd_file)),
-                normalize_columns(pd.read_excel(sr_file)),
-            ],
-            ignore_index=True,
-        )
+            paths = {}
+            for f, name in [
+                (sd_file, "sd.xlsx"),
+                (sr_file, "sr.xlsx"),
+                (tb_file, "tb.xlsx"),
+                (gl_file, "gl.xlsx"),
+            ]:
+                p = os.path.join(tmpdir, name)
+                with open(p, "wb") as out:
+                    out.write(f.getbuffer())
+                paths[name] = p
 
-        df_gl = normalize_columns(pd.read_excel(gl_file))
-        df_tb = normalize_columns(pd.read_excel(tb_file))
+            # ---------- SALES REGISTER ---------- #
 
-        df_sales = sanitize_dataframe(df_sales)
-        df_gl = sanitize_dataframe(df_gl)
-        df_tb = sanitize_dataframe(df_tb)
-
-        # ---------- CREDIT NOTE NEGATIVES ---------- #
-
-        amt_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
-        df_sales["Document Type"] = df_sales["Document Type"].astype(str)
-
-        for c in amt_cols:
-            df_sales[c] = pd.to_numeric(df_sales[c], errors="coerce").fillna(0)
-            df_sales.loc[df_sales["Document Type"] == "C", c] *= -1
-
-        # ---------- SALES SUMMARY COLUMN ---------- #
-
-        df_sales["Tax rate"] = pd.to_numeric(
-            df_sales["Tax rate"], errors="coerce"
-        ).fillna(0)
-
-        def classify(r):
-            if r["Invoice type"] == "SEWOP":
-                return "SEZWOP"
-            if r["Invoice type"] == "SEWP":
-                return "SEWP"
-            if r["Invoice type"] not in ("SEWOP", "SEWP") and r["Tax rate"] == 0:
-                return "Exempt supply"
-            if r["Invoice type"] == "B2B" and r["Document Type"] == "C":
-                return "B2B Credit Notes"
-            if r["Invoice type"] == "B2B":
-                return "B2B Supplies"
-            if r["Invoice type"] == "B2CS":
-                return "B2C Supplies"
-            return ""
-
-        df_sales["Sales summary"] = df_sales.apply(classify, axis=1)
-
-        # ---------- REVENUE & GST PAYABLE ---------- #
-
-        df_revenue = df_gl[
-            df_gl["G/L Account: Long Text"].str.contains("Revenue", case=False, na=False)
-        ]
-
-        df_gst_payable = df_gl[
-            df_gl["G/L Account: Long Text"].str.contains("GST", case=False, na=False)
-        ]
-
-        # ---------- GST SUMMARY ---------- #
-
-        df_gl["Company Code Currency Value"] = pd.to_numeric(
-            df_gl["Company Code Currency Value"], errors="coerce"
-        ).fillna(0)
-
-        df_tb["Period 09 C"] = pd.to_numeric(df_tb["Period 09 C"], errors="coerce").fillna(0)
-        df_tb["Period 09 D"] = pd.to_numeric(df_tb["Period 09 D"], errors="coerce").fillna(0)
-        df_tb["Difference as per TB"] = df_tb["Period 09 C"] - df_tb["Period 09 D"]
-
-        gst_summary = (
-            df_gl
-            .groupby("G/L Account: Long Text", as_index=False)["Company Code Currency Value"]
-            .sum()
-            .merge(
-                df_tb
-                .groupby("G/L Acct Long Text", as_index=False)["Difference as per TB"]
-                .sum(),
-                left_on="G/L Account: Long Text",
-                right_on="G/L Acct Long Text",
-                how="left",
-            )
-            .fillna(0)
-        )
-
-        # ---------- WRITE EXCEL ---------- #
-
-        output_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-        wb = xlsxwriter.Workbook(output_path, {"nan_inf_to_errors": True})
-
-        # ---- CHECK PIVOT SUPPORT (NO CRASH) ---- #
-        if not hasattr(wb, "add_pivot_table"):
-            st.error(
-                "This environment does not support editable Excel Pivot Tables.\n\n"
-                "Please upgrade xlsxwriter to version 3.1.0 or higher "
-                "and redeploy the app."
-            )
-            st.stop()
-
-        ws_sales = wb.add_worksheet("Sales register")
-        ws_rev = wb.add_worksheet("Revenue")
-        ws_gst = wb.add_worksheet("GST payable")
-        ws_gst_sum = wb.add_worksheet("GST Summary")
-        ws_pivot = wb.add_worksheet("Sales summary")
-
-        def write_df(ws, df):
-            for c, col in enumerate(df.columns):
-                ws.write(0, c, col)
-            for r in range(len(df)):
-                for c, col in enumerate(df.columns):
-                    ws.write(r + 1, c, df.iloc[r, c])
-
-        write_df(ws_sales, df_sales)
-        write_df(ws_rev, df_revenue)
-        write_df(ws_gst, df_gst_payable)
-        write_df(ws_gst_sum, gst_summary)
-
-        last_row = len(df_sales)
-        last_col = len(df_sales.columns) - 1
-
-        # ---------- REAL EDITABLE EXCEL PIVOT ---------- #
-
-        wb.add_pivot_table(
-            {
-                "name": "SalesSummaryPivot",
-                "source": (
-                    f"'Sales register'!A1:"
-                    f"{xlsxwriter.utility.xl_col_to_name(last_col)}{last_row+1}"
-                ),
-                "destination": "'Sales summary'!A3",
-                "filters": [{"field": "GSTIN of Taxpayer"}],
-                "rows": [{"field": "Sales summary"}],
-                "values": [
-                    {"field": "Taxable value", "function": "sum"},
-                    {"field": "IGST Amt", "function": "sum"},
-                    {"field": "CGST Amt", "function": "sum"},
-                    {"field": "SGST/UTGST Amt", "function": "sum"},
+            df_sales = pd.concat(
+                [
+                    normalize_columns(pd.read_excel(paths["sd.xlsx"])),
+                    normalize_columns(pd.read_excel(paths["sr.xlsx"]))
                 ],
-            }
-        )
-
-        wb.close()
-
-        with open(output_path, "rb") as f:
-            st.download_button(
-                "Download GSTR-1 Workbook",
-                f.read(),
-                file_name=os.path.basename(output_path),
+                ignore_index=True
             )
+
+            # ---------- GL ---------- #
+
+            df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
+
+            gl_text = find_column_by_keywords(df_gl, ["g/l", "long", "text"], "GL Text")
+            gl_acct = find_column_by_keywords(df_gl, ["g/l", "account"], "GL Account")
+            val_col = find_column_by_keywords(df_gl, ["value"], "Amount")
+            doc_col = find_column_by_keywords(df_gl, ["document"], "Document")
+
+            gst_accounts = [
+                "Central GST Payable",
+                "Integrated GST Payable",
+                "State GST Payable",
+            ]
+
+            df_gst = df_gl[df_gl[gl_text].isin(gst_accounts)]
+            df_rev = df_gl[df_gl[gl_acct].astype(str).str.startswith("3")]
+
+            # ---------- TB ---------- #
+
+            df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
+            tb_text = find_column_by_keywords(df_tb, ["g/l", "acct", "long"], "TB Text")
+            debit = find_column_by_keywords(df_tb, ["period", "d"], "Debit")
+            credit = find_column_by_keywords(df_tb, ["period", "c"], "Credit")
+
+            df_tb_gst = df_tb[df_tb[tb_text].isin(gst_accounts)].copy()
+            df_tb_gst["Difference as per TB"] = df_tb_gst[credit] - df_tb_gst[debit]
+
+            # ---------- GST SUMMARY ---------- #
+
+            summary_df = pd.merge(
+                df_gst.groupby(gl_text, as_index=False)[val_col].sum()
+                .rename(columns={gl_text: "GST Type", val_col: "GST Payable as per GL"}),
+                df_tb_gst.groupby(tb_text, as_index=False)["Difference as per TB"].sum()
+                .rename(columns={tb_text: "GST Type"}),
+                on="GST Type",
+                how="left"
+            ).fillna(0)
+
+            # ---------- WRITE WORKBOOK ---------- #
+
+            gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
+
+            with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
+                df_sales.to_excel(writer, "Sales register", index=False)
+                df_rev.to_excel(writer, "Revenue", index=False)
+                df_gst.to_excel(writer, "GST payable", index=False)
+                summary_df.to_excel(writer, "GST Summary", index=False)
+
+            # ---------- EXCEL POST PROCESS ---------- #
+
+            wb = load_workbook(gstr_path)
+            ws_sales = wb["Sales register"]
+            ws_rev = wb["Revenue"]
+            ws_gst = wb["GST payable"]
+            ws_sum = wb["GST Summary"]
+
+            # --- CREDIT NOTE NEGATIVES --- #
+
+            doc_type = get_column_letter_by_header(ws_sales, "Document Type")
+            amt_cols = [
+                "Taxable value",
+                "IGST Amt",
+                "CGST Amt",
+                "SGST/UTGST Amt"
+            ]
+            amt_letters = [get_column_letter_by_header(ws_sales, c) for c in amt_cols]
+
+            for r in range(2, ws_sales.max_row + 1):
+                if ws_sales[f"{doc_type}{r}"].value == "C":
+                    for c in amt_letters:
+                        if isinstance(ws_sales[f"{c}{r}"].value, (int, float)):
+                            ws_sales[f"{c}{r}"].value *= -1
+
+            # --- SALES SUMMARY COLUMN --- #
+
+            inv = get_column_letter_by_header(ws_sales, "Invoice type")
+            tax = get_column_letter_by_header(ws_sales, "Tax rate")
+
+            ss_col = ws_sales.max_column + 1
+            ws_sales.cell(1, ss_col, "Sales summary")
+
+            for r in range(2, ws_sales.max_row + 1):
+                it = ws_sales[f"{inv}{r}"].value
+                dt = ws_sales[f"{doc_type}{r}"].value
+                tr = float(ws_sales[f"{tax}{r}"].value or 0)
+
+                val = ""
+                if it == "SEWOP":
+                    val = "SEZWOP"
+                elif it == "SEWP":
+                    val = "SEWP"
+                elif it not in ("SEWOP", "SEWP") and tr == 0:
+                    val = "Exempt supply"
+                elif it == "B2B" and dt == "C" and tr != 0:
+                    val = "B2B Credit Notes"
+                elif it == "B2B" and dt != "C" and tr != 0:
+                    val = "B2B Supplies"
+                elif it == "B2CS" and tr != 0:
+                    val = "B2C Supplies"
+
+                ws_sales.cell(r, ss_col, val)
+
+            # --- VLOOKUPS --- #
+
+            gf8 = get_column_letter_by_header(ws_sales, "Generic Field 8")
+            rev_doc = get_column_letter_by_header(ws_rev, "Document Number")
+            gst_doc = get_column_letter_by_header(ws_gst, "Document Number")
+
+            sr_last = ws_sales.max_column
+            ws_sales.cell(1, sr_last + 1, "Revenue VLOOKUP")
+            ws_sales.cell(1, sr_last + 2, "GST Payable VLOOKUP")
+
+            for r in range(2, ws_sales.max_row + 1):
+                ws_sales.cell(r, sr_last + 1,
+                    f'=IFERROR(VLOOKUP({gf8}{r},Revenue!{rev_doc}:{rev_doc},1,FALSE),"Not Found")')
+                ws_sales.cell(r, sr_last + 2,
+                    f'=IFERROR(VLOOKUP({gf8}{r},\'GST payable\'!{gst_doc}:{gst_doc},1,FALSE),"Not Found")')
+
+            # --- CROSS LOOKUPS --- #
+
+            rl = ws_rev.max_column + 1
+            ws_rev.cell(1, rl, "Sales Register VLOOKUP")
+            for r in range(2, ws_rev.max_row + 1):
+                ws_rev.cell(r, rl,
+                    f'=IFERROR(VLOOKUP({rev_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
+
+            gl = ws_gst.max_column + 1
+            ws_gst.cell(1, gl, "Sales Register VLOOKUP")
+            for r in range(2, ws_gst.max_row + 1):
+                ws_gst.cell(r, gl,
+                    f'=IFERROR(VLOOKUP({gst_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
+
+            # --- NET DIFFERENCE --- #
+
+            ws_sum.cell(1, 4, "Net Difference")
+            for r in range(2, ws_sum.max_row + 1):
+                c = ws_sum.cell(r, 4, f"=B{r}+C{r}")
+                c.number_format = "0.00"
+
+            wb.save(gstr_path)
+
+            with open(gstr_path, "rb") as f:
+                outputs["GSTR-1 Workbook.xlsx"] = f.read()
+
+        st.session_state.outputs = outputs
+        st.session_state.processed = True
+        st.success("Processing completed successfully")
+
+    except Exception as e:
+        st.error(str(e))
+
+# ---------------- Download ---------------- #
+
+if st.session_state.processed:
+    for k, v in st.session_state.outputs.items():
+        st.download_button(f"Download {k}", v, file_name=k)
+
 
 
 
