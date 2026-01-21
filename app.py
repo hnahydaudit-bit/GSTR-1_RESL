@@ -23,18 +23,14 @@ def find_column_by_keywords(df, keywords, label):
         col_l = col.lower()
         if all(k.lower() in col_l for k in keywords):
             return col
-    raise KeyError(
-        f"{label} column not found.\n"
-        f"Expected keywords: {keywords}\n"
-        f"Found columns: {list(df.columns)}"
-    )
+    raise KeyError(f"{label} column not found")
 
 
 def get_column_letter_by_header(ws, header_name):
     for col in range(1, ws.max_column + 1):
         if ws.cell(row=1, column=col).value == header_name:
             return ws.cell(row=1, column=col).column_letter
-    raise KeyError(f"Column '{header_name}' not found in sheet '{ws.title}'")
+    raise KeyError(f"Column '{header_name}' not found in {ws.title}")
 
 # ---------------- Session State ---------------- #
 
@@ -44,7 +40,7 @@ if "processed" not in st.session_state:
 
 # ---------------- UI ---------------- #
 
-company_code = st.text_input("Company Code (XXXX)")
+company_code = st.text_input("Company Code")
 
 sd_file = st.file_uploader("Upload SD File", type="xlsx")
 sr_file = st.file_uploader("Upload SR File", type="xlsx")
@@ -55,12 +51,8 @@ gl_file = st.file_uploader("Upload GL Dump File", type="xlsx")
 
 if st.button("Process Files"):
 
-    if not company_code:
-        st.error("Company Code is mandatory")
-        st.stop()
-
-    if not all([sd_file, sr_file, tb_file, gl_file]):
-        st.error("All files must be uploaded")
+    if not all([company_code, sd_file, sr_file, tb_file, gl_file]):
+        st.error("All inputs are mandatory")
         st.stop()
 
     try:
@@ -68,7 +60,6 @@ if st.button("Process Files"):
 
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # Save uploaded files
             paths = {}
             for f, name in [
                 (sd_file, "sd.xlsx"),
@@ -76,24 +67,29 @@ if st.button("Process Files"):
                 (tb_file, "tb.xlsx"),
                 (gl_file, "gl.xlsx"),
             ]:
-                path = os.path.join(tmpdir, name)
-                with open(path, "wb") as out:
+                p = os.path.join(tmpdir, name)
+                with open(p, "wb") as out:
                     out.write(f.getbuffer())
-                paths[name] = path
+                paths[name] = p
 
             # ---------- SALES REGISTER ---------- #
 
-            df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
-            df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
-            df_sales = pd.concat([df_sd, df_sr], ignore_index=True)
+            df_sales = pd.concat(
+                [
+                    normalize_columns(pd.read_excel(paths["sd.xlsx"])),
+                    normalize_columns(pd.read_excel(paths["sr.xlsx"]))
+                ],
+                ignore_index=True
+            )
 
             # ---------- GL ---------- #
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
-            gl_text_col = find_column_by_keywords(df_gl, ["g/l", "account", "long", "text"], "GL Text")
-            gl_account_col = find_column_by_keywords(df_gl, ["g/l", "account"], "GL Account")
-            value_col = find_column_by_keywords(df_gl, ["value"], "Amount")
+            gl_text = find_column_by_keywords(df_gl, ["g/l", "long", "text"], "GL Text")
+            gl_acct = find_column_by_keywords(df_gl, ["g/l", "account"], "GL Account")
+            val_col = find_column_by_keywords(df_gl, ["value"], "Amount")
+            doc_col = find_column_by_keywords(df_gl, ["document"], "Document")
 
             gst_accounts = [
                 "Central GST Payable",
@@ -101,42 +97,26 @@ if st.button("Process Files"):
                 "State GST Payable",
             ]
 
-            df_gst = df_gl[df_gl[gl_text_col].isin(gst_accounts)]
-            df_revenue = df_gl[df_gl[gl_account_col].astype(str).str.startswith("3")]
+            df_gst = df_gl[df_gl[gl_text].isin(gst_accounts)]
+            df_rev = df_gl[df_gl[gl_acct].astype(str).str.startswith("3")]
 
             # ---------- TB ---------- #
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
+            tb_text = find_column_by_keywords(df_tb, ["g/l", "acct", "long"], "TB Text")
+            debit = find_column_by_keywords(df_tb, ["period", "d"], "Debit")
+            credit = find_column_by_keywords(df_tb, ["period", "c"], "Credit")
 
-            tb_text_col = find_column_by_keywords(df_tb, ["g/l", "acct", "long", "text"], "TB GL Text")
-            debit_col = find_column_by_keywords(df_tb, ["period", "d"], "TB Debit")
-            credit_col = find_column_by_keywords(df_tb, ["period", "c"], "TB Credit")
-
-            df_tb_gst = df_tb[df_tb[tb_text_col].isin(gst_accounts)].copy()
-            df_tb_gst["Difference as per TB"] = df_tb_gst[credit_col] - df_tb_gst[debit_col]
+            df_tb_gst = df_tb[df_tb[tb_text].isin(gst_accounts)].copy()
+            df_tb_gst["Difference as per TB"] = df_tb_gst[credit] - df_tb_gst[debit]
 
             # ---------- GST SUMMARY ---------- #
 
-            gst_summary_df = (
-                df_gst
-                .groupby(gl_text_col, as_index=False)[value_col]
-                .sum()
-                .rename(columns={
-                    gl_text_col: "GST Type",
-                    value_col: "GST Payable as per GL"
-                })
-            )
-
-            tb_summary_df = (
-                df_tb_gst
-                .groupby(tb_text_col, as_index=False)["Difference as per TB"]
-                .sum()
-                .rename(columns={tb_text_col: "GST Type"})
-            )
-
             summary_df = pd.merge(
-                gst_summary_df,
-                tb_summary_df,
+                df_gst.groupby(gl_text, as_index=False)[val_col].sum()
+                .rename(columns={gl_text: "GST Type", val_col: "GST Payable as per GL"}),
+                df_tb_gst.groupby(tb_text, as_index=False)["Difference as per TB"].sum()
+                .rename(columns={tb_text: "GST Type"}),
                 on="GST Type",
                 how="left"
             ).fillna(0)
@@ -146,93 +126,101 @@ if st.button("Process Files"):
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
 
             with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
-                df_sales.to_excel(writer, sheet_name="Sales register", index=False)
-                df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
-                df_gst.to_excel(writer, sheet_name="GST payable", index=False)
-                summary_df.to_excel(writer, sheet_name="GST Summary", index=False)
+                df_sales.to_excel(writer, "Sales register", index=False)
+                df_rev.to_excel(writer, "Revenue", index=False)
+                df_gst.to_excel(writer, "GST payable", index=False)
+                summary_df.to_excel(writer, "GST Summary", index=False)
 
-            # ---------- POST PROCESSING IN EXCEL ---------- #
+            # ---------- EXCEL POST PROCESS ---------- #
 
             wb = load_workbook(gstr_path)
             ws_sales = wb["Sales register"]
             ws_rev = wb["Revenue"]
             ws_gst = wb["GST payable"]
-            ws_summary = wb["GST Summary"]
+            ws_sum = wb["GST Summary"]
 
-            # ---- Negative values for Credit Notes ---- #
+            # --- CREDIT NOTE NEGATIVES --- #
 
-            doc_type_col = get_column_letter_by_header(ws_sales, "Document Type")
-            amount_cols = ["Taxable value", "IGST Amt", "CGST Amt", "SGST/UTGST Amt"]
-            amount_col_letters = [get_column_letter_by_header(ws_sales, c) for c in amount_cols]
-
-            for r in range(2, ws_sales.max_row + 1):
-                if ws_sales[f"{doc_type_col}{r}"].value == "C":
-                    for c in amount_col_letters:
-                        cell = ws_sales[f"{c}{r}"]
-                        if isinstance(cell.value, (int, float)):
-                            cell.value = -abs(cell.value)
-
-            # ---- SALES SUMMARY COLUMN (NEW FEATURE) ---- #
-
-            inv_type_col = get_column_letter_by_header(ws_sales, "Invoice type")
-            tax_rate_col = get_column_letter_by_header(ws_sales, "Tax rate")
-
-            sales_last_col = ws_sales.max_column
-            ws_sales.cell(1, sales_last_col + 1, "Sales summary")
+            doc_type = get_column_letter_by_header(ws_sales, "Document Type")
+            amt_cols = [
+                "Taxable value",
+                "IGST Amt",
+                "CGST Amt",
+                "SGST/UTGST Amt"
+            ]
+            amt_letters = [get_column_letter_by_header(ws_sales, c) for c in amt_cols]
 
             for r in range(2, ws_sales.max_row + 1):
-                ws_sales.cell(
-                    r, sales_last_col + 1,
-                    f'=IF({inv_type_col}{r}="SEWOP","SEZWOP",'
-                    f'IF({inv_type_col}{r}="SEWP","SEWP",'
-                    f'IF(AND({inv_type_col}{r}<>"SEWOP",{inv_type_col}{r}<>"SEWP",{tax_rate_col}{r}=0),"Exempt supply",'
-                    f'IF(AND({inv_type_col}{r}="B2B",{doc_type_col}{r}="C",{tax_rate_col}{r}<>0),"B2B Credit Notes",'
-                    f'IF(AND({inv_type_col}{r}="B2B",{doc_type_col}{r}<>"C",{tax_rate_col}{r}<>0),"B2B Supplies",'
-                    f'IF(AND({inv_type_col}{r}="B2C",{tax_rate_col}{r}<>0),"B2C Supplies",""))))))'
-                )
+                if ws_sales[f"{doc_type}{r}"].value == "C":
+                    for c in amt_letters:
+                        if isinstance(ws_sales[f"{c}{r}"].value, (int, float)):
+                            ws_sales[f"{c}{r}"].value *= -1
 
-            # ---- VLOOKUPS (already correct) ---- #
+            # --- SALES SUMMARY COLUMN --- #
 
-            sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
-            rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
-            gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
+            inv = get_column_letter_by_header(ws_sales, "Invoice type")
+            tax = get_column_letter_by_header(ws_sales, "Tax rate")
 
-            lookup_start_col = ws_sales.max_column + 1
-            ws_sales.cell(1, lookup_start_col, "Revenue VLOOKUP")
-            ws_sales.cell(1, lookup_start_col + 1, "GST Payable VLOOKUP")
+            ss_col = ws_sales.max_column + 1
+            ws_sales.cell(1, ss_col, "Sales summary")
 
             for r in range(2, ws_sales.max_row + 1):
-                ws_sales.cell(
-                    r, lookup_start_col,
-                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},Revenue!{rev_doc_col}:{rev_doc_col},1,FALSE),"Not Found")'
-                )
-                ws_sales.cell(
-                    r, lookup_start_col + 1,
-                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
-                )
+                it = ws_sales[f"{inv}{r}"].value
+                dt = ws_sales[f"{doc_type}{r}"].value
+                tr = float(ws_sales[f"{tax}{r}"].value or 0)
 
-            rev_last_col = ws_rev.max_column
-            ws_rev.cell(1, rev_last_col + 1, "Sales Register VLOOKUP")
+                val = ""
+                if it == "SEWOP":
+                    val = "SEZWOP"
+                elif it == "SEWP":
+                    val = "SEWP"
+                elif it not in ("SEWOP", "SEWP") and tr == 0:
+                    val = "Exempt supply"
+                elif it == "B2B" and dt == "C" and tr != 0:
+                    val = "B2B Credit Notes"
+                elif it == "B2B" and dt != "C" and tr != 0:
+                    val = "B2B Supplies"
+                elif it == "B2CS" and tr != 0:
+                    val = "B2C Supplies"
+
+                ws_sales.cell(r, ss_col, val)
+
+            # --- VLOOKUPS --- #
+
+            gf8 = get_column_letter_by_header(ws_sales, "Generic Field 8")
+            rev_doc = get_column_letter_by_header(ws_rev, "Document Number")
+            gst_doc = get_column_letter_by_header(ws_gst, "Document Number")
+
+            sr_last = ws_sales.max_column
+            ws_sales.cell(1, sr_last + 1, "Revenue VLOOKUP")
+            ws_sales.cell(1, sr_last + 2, "GST Payable VLOOKUP")
+
+            for r in range(2, ws_sales.max_row + 1):
+                ws_sales.cell(r, sr_last + 1,
+                    f'=IFERROR(VLOOKUP({gf8}{r},Revenue!{rev_doc}:{rev_doc},1,FALSE),"Not Found")')
+                ws_sales.cell(r, sr_last + 2,
+                    f'=IFERROR(VLOOKUP({gf8}{r},\'GST payable\'!{gst_doc}:{gst_doc},1,FALSE),"Not Found")')
+
+            # --- CROSS LOOKUPS --- #
+
+            rl = ws_rev.max_column + 1
+            ws_rev.cell(1, rl, "Sales Register VLOOKUP")
             for r in range(2, ws_rev.max_row + 1):
-                ws_rev.cell(
-                    r, rev_last_col + 1,
-                    f'=IFERROR(VLOOKUP({rev_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
-                )
+                ws_rev.cell(r, rl,
+                    f'=IFERROR(VLOOKUP({rev_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
 
-            gst_last_col = ws_gst.max_column
-            ws_gst.cell(1, gst_last_col + 1, "Sales Register VLOOKUP")
+            gl = ws_gst.max_column + 1
+            ws_gst.cell(1, gl, "Sales Register VLOOKUP")
             for r in range(2, ws_gst.max_row + 1):
-                ws_gst.cell(
-                    r, gst_last_col + 1,
-                    f'=IFERROR(VLOOKUP({gst_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
-                )
+                ws_gst.cell(r, gl,
+                    f'=IFERROR(VLOOKUP({gst_doc}{r},\'Sales register\'!{gf8}:{gf8},1,FALSE),"Not Found")')
 
-            # ---- NET DIFFERENCE FORMULA + FORMAT ---- #
+            # --- NET DIFFERENCE --- #
 
-            ws_summary.cell(1, 4, "Net Difference")
-            for r in range(2, ws_summary.max_row + 1):
-                cell = ws_summary.cell(r, 4, f"=B{r}+C{r}")
-                cell.number_format = "0.00"
+            ws_sum.cell(1, 4, "Net Difference")
+            for r in range(2, ws_sum.max_row + 1):
+                c = ws_sum.cell(r, 4, f"=B{r}+C{r}")
+                c.number_format = "0.00"
 
             wb.save(gstr_path)
 
@@ -246,13 +234,8 @@ if st.button("Process Files"):
     except Exception as e:
         st.error(str(e))
 
-# ---------------- Downloads ---------------- #
+# ---------------- Download ---------------- #
 
 if st.session_state.processed:
-    for filename, data in st.session_state.outputs.items():
-        st.download_button(
-            label=f"Download {filename}",
-            data=data,
-            file_name=filename,
-            key=filename
-        )
+    for k, v in st.session_state.outputs.items():
+        st.download_button(f"Download {k}", v, file_name=k)
