@@ -6,7 +6,7 @@ import tempfile
 st.set_page_config(page_title="GSTR-1 Processor", layout="centered")
 st.title("GSTR-1 Excel Processor")
 
-# ---------------- Utility functions ---------------- #
+# ---------------- Utilities ---------------- #
 
 def normalize_columns(df):
     df.columns = (
@@ -17,14 +17,22 @@ def normalize_columns(df):
     return df
 
 
-def find_column(df, possible_names, label):
+def find_column_by_keywords(df, keywords, label):
+    """
+    Finds a column containing ALL keywords (case-insensitive).
+    This is hardened against:
+    - Acct vs Account
+    - Presence/absence of colon
+    - Minor SAP naming variations
+    """
     for col in df.columns:
-        for name in possible_names:
-            if col.lower() == name.lower():
-                return col
+        col_l = col.lower()
+        if all(k.lower() in col_l for k in keywords):
+            return col
+
     raise KeyError(
         f"{label} column not found.\n"
-        f"Expected one of: {possible_names}\n"
+        f"Expected keywords: {keywords}\n"
         f"Found columns: {list(df.columns)}"
     )
 
@@ -51,6 +59,8 @@ if st.button("Process Files"):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
+
+            # ---------- Save uploaded files ---------- #
 
             paths = {}
             for f, name in [
@@ -83,28 +93,21 @@ if st.button("Process Files"):
 
             df_gl = normalize_columns(pd.read_excel(paths["gl.xlsx"]))
 
-            gl_text_col = find_column(
+            gl_text_col = find_column_by_keywords(
                 df_gl,
-                [
-                    "G/L Account: Long Text",
-                    "G/L Account Long Text",
-                ],
-                "GL Account Long Text"
+                ["g/l", "account", "long", "text"],
+                "GL Long Text"
             )
 
-            gl_account_col = find_column(
+            gl_account_col = find_column_by_keywords(
                 df_gl,
-                ["G/L Account", "GL Account"],
+                ["g/l", "account"],
                 "GL Account"
             )
 
-            value_col = find_column(
+            value_col = find_column_by_keywords(
                 df_gl,
-                [
-                    "Company Code Currency Value",
-                    "Amount in Company Code Currency",
-                    "Amount",
-                ],
+                ["value"],
                 "GL Amount"
             )
 
@@ -131,30 +134,30 @@ if st.button("Process Files"):
 
             df_tb = normalize_columns(pd.read_excel(paths["tb.xlsx"]))
 
-            tb_text_col = find_column(
+            tb_text_col = find_column_by_keywords(
                 df_tb,
-                [
-                    "G/L Acct Long Text",      # ← FIXED
-                    "G/L Acct: Long Text",
-                    "G/L Acct Long Text",
-                ],
-                "TB GL Text"
+                ["g/l", "acct", "long", "text"],   # ← HARDENED FIX
+                "TB GL Long Text"
             )
 
-            debit_col = find_column(
+            debit_col = find_column_by_keywords(
                 df_tb,
-                ["Period 09 D", "Debit"],
+                ["period", "d"],
                 "TB Debit"
             )
 
-            credit_col = find_column(
+            credit_col = find_column_by_keywords(
                 df_tb,
-                ["Period 09 C", "Credit"],
+                ["period", "c"],
                 "TB Credit"
             )
 
             df_tb_gst = df_tb[df_tb[tb_text_col].isin(gst_accounts)].copy()
-            df_tb_gst["Difference"] = df_tb_gst[credit_col] - df_tb_gst[debit_col]
+            df_tb_gst["Difference"] = (
+                df_tb_gst[credit_col] - df_tb_gst[debit_col]
+            )
+
+            # ---------- Summary ---------- #
 
             gst_summary = (
                 df_gst.groupby(gl_text_col)[value_col].sum()
