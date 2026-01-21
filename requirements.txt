@@ -1,2 +1,4 @@
-pandas==2.0.3  # For data manipulation and Excel handling
-openpyxl==3.1.2  # For reading/writing Excel files
+pandas>=2.2.2
+openpyxl>=3.1.2
+streamlit
+
