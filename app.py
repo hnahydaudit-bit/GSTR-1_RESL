@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import os
 import tempfile
+import xlsxwriter
 from openpyxl import load_workbook
-from openpyxl.worksheet.table import Table
-from openpyxl.utils import get_column_letter
-from openpyxl.pivot.table import PivotTable, PivotCache, PivotCacheDefinition
 
 st.set_page_config(page_title="GSTR-1 Processor", layout="centered")
 st.title("GSTR-1 Excel Processor")
@@ -20,17 +18,15 @@ def normalize_columns(df):
     )
     return df
 
-def find_column_by_keywords(df, keywords, label):
-    for col in df.columns:
-        if all(k.lower() in col.lower() for k in keywords):
-            return col
-    raise KeyError(f"{label} column not found")
 
-def get_column_letter_by_header(ws, header):
-    for c in range(1, ws.max_column + 1):
-        if ws.cell(1, c).value == header:
-            return ws.cell(1, c).column_letter
-    raise KeyError(f"{header} not found in {ws.title}")
+def find_column(df, name):
+    if name not in df.columns:
+        raise KeyError(f"Column '{name}' not found")
+    return name
+
+
+def get_col_idx(headers, name):
+    return headers.index(name)
 
 # ---------------- Session State ---------------- #
 
@@ -60,75 +56,65 @@ if st.button("Process Files"):
 
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            paths = {}
-            for f, name in [
-                (sd_file, "sd.xlsx"),
-                (sr_file, "sr.xlsx"),
-                (tb_file, "tb.xlsx"),
-                (gl_file, "gl.xlsx"),
-            ]:
-                p = os.path.join(tmpdir, name)
-                with open(p, "wb") as out:
-                    out.write(f.getbuffer())
-                paths[name] = p
-
-            # ---------- SALES REGISTER ---------- #
+            # ---------------- READ SALES REGISTER ---------------- #
 
             df_sales = pd.concat(
                 [
-                    normalize_columns(pd.read_excel(paths["sd.xlsx"])),
-                    normalize_columns(pd.read_excel(paths["sr.xlsx"]))
+                    normalize_columns(pd.read_excel(sd_file)),
+                    normalize_columns(pd.read_excel(sr_file))
                 ],
                 ignore_index=True
             )
 
-            # ---------- WRITE BASE WORKBOOK ---------- #
+            # ---------------- WRITE USING XLSXWRITER ---------------- #
 
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
-            with pd.ExcelWriter(gstr_path, engine="openpyxl") as writer:
-                df_sales.to_excel(writer, "Sales register", index=False)
 
-            # ---------- EXCEL POST PROCESS ---------- #
+            workbook = xlsxwriter.Workbook(gstr_path)
+            ws_sales = workbook.add_worksheet("Sales register")
+            ws_pivot = workbook.add_worksheet("Sales summary")
 
-            wb = load_workbook(gstr_path)
-            ws = wb["Sales register"]
+            # Write Sales register
+            for c, col in enumerate(df_sales.columns):
+                ws_sales.write(0, c, col)
 
-            # Convert Sales register into Excel Table (required for pivot)
-            end_col = get_column_letter(ws.max_column)
-            end_row = ws.max_row
-            table = Table(displayName="SalesRegisterTable", ref=f"A1:{end_col}{end_row}")
-            ws.add_table(table)
+            for r in range(len(df_sales)):
+                for c, col in enumerate(df_sales.columns):
+                    ws_sales.write(r + 1, c, df_sales.iloc[r, c])
 
-            # ---------- CREATE PIVOT ---------- #
+            # Define table range
+            last_row = len(df_sales)
+            last_col = len(df_sales.columns) - 1
 
-            pivot_cache = PivotCacheDefinition(
-                cacheId=1,
-                sourceRef=f"SalesRegisterTable"
+            ws_sales.add_table(
+                0, 0, last_row, last_col,
+                {"columns": [{"header": c} for c in df_sales.columns]}
             )
 
-            pivot_table = PivotTable(
-                name="SalesSummaryPivot",
-                cacheId=1,
-                ref="A3"
-            )
+            # ---------------- CREATE PIVOT ---------------- #
 
-            # Filters
-            pivot_table.addReportFilter("GSTIN of Taxpayer")
+            pivot = workbook.add_pivot_table({
+                "name": "SalesSummaryPivot",
+                "source": "Sales register!A1:{}{}".format(
+                    xlsxwriter.utility.xl_col_to_name(last_col),
+                    last_row + 1
+                ),
+                "destination": "Sales summary!A3",
+                "filters": [
+                    {"field": "GSTIN of Taxpayer"}
+                ],
+                "rows": [
+                    {"field": "Sales summary"}
+                ],
+                "values": [
+                    {"field": "Taxable value", "function": "sum"},
+                    {"field": "IGST Amt", "function": "sum"},
+                    {"field": "CGST Amt", "function": "sum"},
+                    {"field": "SGST/UTGST Amt", "function": "sum"},
+                ],
+            })
 
-            # Rows
-            pivot_table.addRowField("Sales summary")
-
-            # Values (order preserved)
-            pivot_table.addDataField("Taxable value", "Sum of Taxable value")
-            pivot_table.addDataField("IGST Amt", "Sum of IGST Amt")
-            pivot_table.addDataField("CGST Amt", "Sum of CGST Amt")
-            pivot_table.addDataField("SGST/UTGST Amt", "Sum of SGST/UTGST Amt")
-
-            pivot_ws = wb.create_sheet("Sales summary")
-            pivot_ws._pivots.append(pivot_table)
-            wb._pivots.append(pivot_cache)
-
-            wb.save(gstr_path)
+            workbook.close()
 
             with open(gstr_path, "rb") as f:
                 outputs["GSTR-1 Workbook.xlsx"] = f.read()
@@ -144,4 +130,8 @@ if st.button("Process Files"):
 
 if st.session_state.processed:
     for k, v in st.session_state.outputs.items():
-        st.download_button(f"Download {k}", v, file_name=k)
+        st.download_button(
+            label=f"Download {k}",
+            data=v,
+            file_name=k
+        )
