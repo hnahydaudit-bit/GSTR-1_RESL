@@ -84,7 +84,7 @@ if st.button("Process Files"):
                 return "SEZWOP"
             if r["Invoice type"] == "SEWP":
                 return "SEWP"
-            if r["Tax rate"] == 0:
+            if r["Invoice type"] not in ("SEWOP", "SEWP") and r["Tax rate"] == 0:
                 return "Exempt supply"
             if r["Invoice type"] == "B2B" and r["Document Type"] == "C":
                 return "B2B Credit Notes"
@@ -98,8 +98,13 @@ if st.button("Process Files"):
 
         # ---------- REVENUE & GST PAYABLE ---------- #
 
-        df_revenue = df_gl[df_gl["G/L Account: Long Text"].str.contains("Revenue", case=False)]
-        df_gst_payable = df_gl[df_gl["G/L Account: Long Text"].str.contains("GST", case=False)]
+        df_revenue = df_gl[
+            df_gl["G/L Account: Long Text"].str.contains("Revenue", case=False, na=False)
+        ]
+
+        df_gst_payable = df_gl[
+            df_gl["G/L Account: Long Text"].str.contains("GST", case=False, na=False)
+        ]
 
         # ---------- GST SUMMARY ---------- #
 
@@ -109,17 +114,16 @@ if st.button("Process Files"):
 
         df_tb["Period 09 C"] = pd.to_numeric(df_tb["Period 09 C"], errors="coerce").fillna(0)
         df_tb["Period 09 D"] = pd.to_numeric(df_tb["Period 09 D"], errors="coerce").fillna(0)
-
         df_tb["Difference as per TB"] = df_tb["Period 09 C"] - df_tb["Period 09 D"]
 
         gst_summary = (
-            df_gl.groupby("G/L Account: Long Text", as_index=False)[
-                "Company Code Currency Value"
-            ].sum()
+            df_gl
+            .groupby("G/L Account: Long Text", as_index=False)["Company Code Currency Value"]
+            .sum()
             .merge(
-                df_tb.groupby("G/L Acct Long Text", as_index=False)[
-                    "Difference as per TB"
-                ].sum(),
+                df_tb
+                .groupby("G/L Acct Long Text", as_index=False)["Difference as per TB"]
+                .sum(),
                 left_on="G/L Account: Long Text",
                 right_on="G/L Acct Long Text",
                 how="left",
@@ -131,6 +135,15 @@ if st.button("Process Files"):
 
         output_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
         wb = xlsxwriter.Workbook(output_path, {"nan_inf_to_errors": True})
+
+        # ---- CHECK PIVOT SUPPORT (NO CRASH) ---- #
+        if not hasattr(wb, "add_pivot_table"):
+            st.error(
+                "This environment does not support editable Excel Pivot Tables.\n\n"
+                "Please upgrade xlsxwriter to version 3.1.0 or higher "
+                "and redeploy the app."
+            )
+            st.stop()
 
         ws_sales = wb.add_worksheet("Sales register")
         ws_rev = wb.add_worksheet("Revenue")
@@ -153,13 +166,7 @@ if st.button("Process Files"):
         last_row = len(df_sales)
         last_col = len(df_sales.columns) - 1
 
-        # ---------- REAL EXCEL PIVOT (EDITABLE) ---------- #
-
-        if not hasattr(wb, "add_pivot_table"):
-            raise RuntimeError(
-                "This environment does not support Excel pivot tables. "
-                "Install xlsxwriter >= 3.1.0."
-            )
+        # ---------- REAL EDITABLE EXCEL PIVOT ---------- #
 
         wb.add_pivot_table(
             {
@@ -188,6 +195,7 @@ if st.button("Process Files"):
                 f.read(),
                 file_name=os.path.basename(output_path),
             )
+
 
 
 
