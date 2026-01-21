@@ -29,6 +29,13 @@ def find_column_by_keywords(df, keywords, label):
         f"Found columns: {list(df.columns)}"
     )
 
+
+def get_column_letter_by_header(ws, header_name):
+    for col in range(1, ws.max_column + 1):
+        if ws.cell(row=1, column=col).value == header_name:
+            return ws.cell(row=1, column=col).column_letter
+    raise KeyError(f"Column '{header_name}' not found in sheet '{ws.title}'")
+
 # ---------------- Session State ---------------- #
 
 if "processed" not in st.session_state:
@@ -74,11 +81,10 @@ if st.button("Process Files"):
                     out.write(f.getbuffer())
                 paths[name] = path
 
-            # ---------- SD + SR ---------- #
+            # ---------- SALES REGISTER ---------- #
 
             df_sd = normalize_columns(pd.read_excel(paths["sd.xlsx"]))
             df_sr = normalize_columns(pd.read_excel(paths["sr.xlsx"]))
-
             df_sales = pd.concat([df_sd, df_sr], ignore_index=True)
 
             # ---------- GL ---------- #
@@ -99,7 +105,7 @@ if st.button("Process Files"):
             df_gst = df_gl[df_gl[gl_text_col].isin(gst_accounts)]
             df_revenue = df_gl[df_gl[gl_account_col].astype(str).str.startswith("3")]
 
-            # ---------- GSTR-1 Workbook ---------- #
+            # ---------- GSTR-1 WORKBOOK ---------- #
 
             gstr_path = os.path.join(tmpdir, f"{company_code}_GSTR-1_Workbook.xlsx")
 
@@ -108,42 +114,49 @@ if st.button("Process Files"):
                 df_revenue.to_excel(writer, sheet_name="Revenue", index=False)
                 df_gst.to_excel(writer, sheet_name="GST payable", index=False)
 
-            # ---------- ADD VLOOKUP FORMULAS ---------- #
+            # ---------- ADD VLOOKUPS (CORRECTED) ---------- #
 
             wb = load_workbook(gstr_path)
-
             ws_sales = wb["Sales register"]
             ws_rev = wb["Revenue"]
             ws_gst = wb["GST payable"]
 
+            # Identify columns dynamically
+            sales_lookup_col = get_column_letter_by_header(ws_sales, "Generic Field 8")
+            rev_doc_col = get_column_letter_by_header(ws_rev, "Document Number")
+            gst_doc_col = get_column_letter_by_header(ws_gst, "Document Number")
+
+            # Add lookup columns to Sales register
             sales_last_col = ws_sales.max_column
-            ws_sales.cell(row=1, column=sales_last_col + 1, value="Revenue VLOOKUP")
-            ws_sales.cell(row=1, column=sales_last_col + 2, value="GST Payable VLOOKUP")
+            ws_sales.cell(1, sales_last_col + 1, "Revenue VLOOKUP")
+            ws_sales.cell(1, sales_last_col + 2, "GST Payable VLOOKUP")
 
             for r in range(2, ws_sales.max_row + 1):
                 ws_sales.cell(
-                    row=r, column=sales_last_col + 1,
-                    value=f'=IFERROR(VLOOKUP(A{r},Revenue!A:A,1,FALSE),"Not Found")'
+                    r, sales_last_col + 1,
+                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},Revenue!{rev_doc_col}:{rev_doc_col},1,FALSE),"Not Found")'
                 )
                 ws_sales.cell(
-                    row=r, column=sales_last_col + 2,
-                    value=f'=IFERROR(VLOOKUP(A{r},\'GST payable\'!A:A,1,FALSE),"Not Found")'
+                    r, sales_last_col + 2,
+                    f'=IFERROR(VLOOKUP({sales_lookup_col}{r},\'GST payable\'!{gst_doc_col}:{gst_doc_col},1,FALSE),"Not Found")'
                 )
 
+            # Cross lookup: Revenue → Sales register
             rev_last_col = ws_rev.max_column
-            ws_rev.cell(row=1, column=rev_last_col + 1, value="Sales Register VLOOKUP")
+            ws_rev.cell(1, rev_last_col + 1, "Sales Register VLOOKUP")
             for r in range(2, ws_rev.max_row + 1):
                 ws_rev.cell(
-                    row=r, column=rev_last_col + 1,
-                    value=f'=IFERROR(VLOOKUP(A{r},\'Sales register\'!A:A,1,FALSE),"Not Found")'
+                    r, rev_last_col + 1,
+                    f'=IFERROR(VLOOKUP({rev_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
                 )
 
+            # Cross lookup: GST payable → Sales register
             gst_last_col = ws_gst.max_column
-            ws_gst.cell(row=1, column=gst_last_col + 1, value="Sales Register VLOOKUP")
+            ws_gst.cell(1, gst_last_col + 1, "Sales Register VLOOKUP")
             for r in range(2, ws_gst.max_row + 1):
                 ws_gst.cell(
-                    row=r, column=gst_last_col + 1,
-                    value=f'=IFERROR(VLOOKUP(A{r},\'Sales register\'!A:A,1,FALSE),"Not Found")'
+                    r, gst_last_col + 1,
+                    f'=IFERROR(VLOOKUP({gst_doc_col}{r},\'Sales register\'!{sales_lookup_col}:{sales_lookup_col},1,FALSE),"Not Found")'
                 )
 
             wb.save(gstr_path)
@@ -168,6 +181,7 @@ if st.session_state.processed:
             file_name=filename,
             key=filename
         )
+
 
 
 
